@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+
+membora:
+  security:
+    jwt-secret: ${JWT_SECRET}
+  firebase:
+    project-id: ${FIREBASE_PROJECT_ID}
+  imagekit:
+    private-key: ${IMAGEKIT_PRIVATE_KEY}
+    public-key: ${IMAGEKIT_PUBLIC_KEY}
+    url-endpoint: ${IMAGEKIT_URL_ENDPOINT}
