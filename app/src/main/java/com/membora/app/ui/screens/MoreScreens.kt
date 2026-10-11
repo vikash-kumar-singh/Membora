@@ -19,6 +19,8 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.PrivacyTip
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stars
 import androidx.compose.material.icons.rounded.Sync
@@ -31,9 +33,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.membora.app.data.MemboraRepository
+import com.membora.app.LegalLinks
 import com.membora.app.data.WorkspacePermission
 import com.membora.app.automation.AutomationScheduler
 import com.membora.app.data.DataSyncStatus
@@ -60,9 +64,35 @@ fun MoreScreen(
     onAutomations: () -> Unit,
     onStaff: () -> Unit,
     onSettings: () -> Unit,
+    isGuestSession: Boolean = false,
+    guestTrialDaysRemaining: Int? = null,
+    onUpgradeGuest: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
     var syncMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    var showGuestExitWarning by rememberSaveable { mutableStateOf(false) }
+    val uriHandler = LocalUriHandler.current
+    if (showGuestExitWarning) {
+        AlertDialog(
+            onDismissRequest = { showGuestExitWarning = false },
+            title = { Text("Exit guest workspace?") },
+            text = {
+                Text("This workspace cannot be recovered on another device after you sign out. Create an account first if you want to keep access to its data.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showGuestExitWarning = false
+                        onSignOut()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) { Text("Exit guest workspace") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showGuestExitWarning = false }) { Text("Keep workspace") }
+            }
+        )
+    }
     val items = buildList {
         if (repository.can(WorkspacePermission.MANAGE_CATALOG)) {
             add(MoreItem(Icons.Rounded.AccountTree, "Plans", "Durations, prices and bundled services", MaterialTheme.colorScheme.primary, onPlans))
@@ -102,6 +132,37 @@ fun MoreScreen(
                         Text("${repository.organization.businessType} • ${repository.organization.branchName}", style = MaterialTheme.typography.bodyMedium)
                     }
                     Text(repository.currentWorkspaceRole, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                }
+            }
+        }
+        if (isGuestSession) {
+            item {
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                    shape = RoundedCornerShape(22.dp)
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                        Text("Guest workspace", style = MaterialTheme.typography.titleMedium)
+                        Spacer(Modifier.height(4.dp))
+                        guestTrialDaysRemaining?.let { days ->
+                            Text(
+                                if (days == 1) "1 day remaining in your guest trial"
+                                else "$days days remaining in your guest trial",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.height(4.dp))
+                        }
+                        Text(
+                            "Guest access ends after 15 days. Create an account with email or Google to keep access and use this workspace on another device.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(12.dp))
+                        Button(onClick = onUpgradeGuest, modifier = Modifier.fillMaxWidth()) {
+                            Text("Create account and keep this workspace")
+                        }
+                    }
                 }
             }
         }
@@ -193,10 +254,41 @@ fun MoreScreen(
             }
         }
         item {
-            OutlinedButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+            AppCard {
+                Text("Privacy & account", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "Review how data is handled or request permanent deletion of your account and associated data.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(8.dp))
+                TextButton(
+                    onClick = { uriHandler.openUri(LegalLinks.PRIVACY_POLICY) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Rounded.PrivacyTip, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Privacy policy")
+                }
+                TextButton(
+                    onClick = { uriHandler.openUri(LegalLinks.ACCOUNT_DELETION) },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Icon(Icons.Rounded.DeleteForever, contentDescription = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete account and data")
+                }
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = { if (isGuestSession) showGuestExitWarning = true else onSignOut() },
+                modifier = Modifier.fillMaxWidth()
+            ) {
                 Icon(Icons.AutoMirrored.Rounded.Logout, contentDescription = null)
                 Spacer(Modifier.width(8.dp))
-                Text("Sign out")
+                Text(if (isGuestSession) "Exit guest workspace" else "Sign out")
             }
         }
         item {

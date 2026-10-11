@@ -143,12 +143,20 @@ fun StaffInvitationAcceptanceScreen(
 }
 
 @Composable
-fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> Unit) {
+fun AuthenticationScreen(
+    onContinueAsGuest: () -> Unit,
+    onAuthenticated: () -> Unit,
+    upgradingGuest: Boolean = false,
+    guestTrialExpired: Boolean = false,
+    installationGuestTrialStartedAtMillis: Long? = null
+) {
     val context = LocalContext.current
     val googleWebClientId = stringResource(R.string.default_web_client_id)
     val credentialManager = remember(context) { CredentialManager.create(context) }
     val coroutineScope = rememberCoroutineScope()
-    var mode by rememberSaveable { mutableStateOf(AuthMode.LOGIN) }
+    var mode by rememberSaveable(upgradingGuest) {
+        mutableStateOf(if (upgradingGuest) AuthMode.REGISTER else AuthMode.LOGIN)
+    }
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var loading by rememberSaveable { mutableStateOf(false) }
@@ -217,7 +225,10 @@ fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> U
                 }
 
                 val googleCredential = GoogleIdTokenCredential.createFrom(credential.data)
-                FirebaseServices.signInWithGoogleIdToken(googleCredential.idToken) { result ->
+                FirebaseServices.signInWithGoogleIdToken(
+                    idToken = googleCredential.idToken,
+                    preserveAnonymousWorkspace = upgradingGuest
+                ) { result ->
                     loading = false
                     result.fold(
                         onSuccess = { onAuthenticated() },
@@ -251,7 +262,18 @@ fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> U
         FirebaseServices.ensureAnonymousUser { result ->
             loading = false
             result.fold(
-                onSuccess = { onContinueAsGuest() },
+                onSuccess = { user ->
+                    val trial = com.membora.app.ui.guestTrialStatus(
+                        anonymousUserCreatedAtMillis = user.metadata?.creationTimestamp,
+                        installationTrialStartedAtMillis = installationGuestTrialStartedAtMillis,
+                        nowMillis = System.currentTimeMillis()
+                    )
+                    if (trial.isExpired) {
+                        error = "Your 15-day guest trial has ended. Create an account with email or Google to continue."
+                    } else {
+                        onContinueAsGuest()
+                    }
+                },
                 onFailure = { error = it.localizedMessage ?: "Unable to start a guest session" }
             )
         }
@@ -287,6 +309,8 @@ fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> U
                             onSubmit = ::submit,
                             onGoogleSignIn = ::signInWithGoogle,
                             onContinueAsGuest = ::continueAsGuest,
+                            upgradingGuest = upgradingGuest,
+                            guestTrialExpired = guestTrialExpired,
                             modifier = Modifier.weight(1.1f)
                         )
                     }
@@ -306,6 +330,8 @@ fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> U
                             onSubmit = ::submit,
                             onGoogleSignIn = ::signInWithGoogle,
                             onContinueAsGuest = ::continueAsGuest,
+                            upgradingGuest = upgradingGuest,
+                            guestTrialExpired = guestTrialExpired,
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -346,17 +372,27 @@ private fun AuthForm(
     onSubmit: () -> Unit,
     onGoogleSignIn: () -> Unit,
     onContinueAsGuest: () -> Unit,
+    upgradingGuest: Boolean,
+    guestTrialExpired: Boolean,
     modifier: Modifier = Modifier
 ) {
     Column(modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        val title = when (mode) {
+        val title = if (guestTrialExpired) {
+            "Your 15-day guest trial has ended"
+        } else if (upgradingGuest) "Protect your guest workspace" else when (mode) {
             AuthMode.LOGIN -> "Welcome back"
             AuthMode.REGISTER -> "Create your account"
             AuthMode.RESET_PASSWORD -> "Reset your password"
         }
-        val subtitle = when (mode) {
-            AuthMode.LOGIN -> "Sign in to sync your Membora workspace."
-            AuthMode.REGISTER -> "Register to keep your workspace backed up with Firebase."
+        val subtitle = if (guestTrialExpired) {
+            "Create an account with email or Google to keep this workspace and continue using Membora."
+        } else when (mode) {
+            AuthMode.LOGIN -> if (upgradingGuest) {
+                "Signing into an existing account opens that account; it does not transfer this guest workspace."
+            } else "Sign in to sync your Membora workspace."
+            AuthMode.REGISTER -> if (upgradingGuest) {
+                "Create credentials for this guest workspace so it stays recoverable on other devices."
+            } else "Register to keep your workspace backed up with Firebase."
             AuthMode.RESET_PASSWORD -> "Enter your registered email and we’ll send you a reset link."
         }
         Text(title, style = MaterialTheme.typography.headlineSmall)
@@ -372,7 +408,11 @@ private fun AuthForm(
             ) {
                 Text("G", fontWeight = FontWeight.Bold)
                 Spacer(Modifier.padding(horizontal = 4.dp))
-                Text(if (loading) "Connecting…" else "Continue with Google")
+                Text(
+                    if (loading) "Connecting…"
+                    else if (upgradingGuest) "Upgrade with Google"
+                    else "Continue with Google"
+                )
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 HorizontalDivider(Modifier.weight(1f))
@@ -417,29 +457,31 @@ private fun AuthForm(
                 }
             )
         }
-        OutlinedButton(
-            onClick = {
-                onModeChange(
+        if (!upgradingGuest) {
+            OutlinedButton(
+                onClick = {
+                    onModeChange(
+                        when (mode) {
+                            AuthMode.LOGIN -> AuthMode.REGISTER
+                            AuthMode.REGISTER, AuthMode.RESET_PASSWORD -> AuthMode.LOGIN
+                        }
+                    )
+                },
+                enabled = !loading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
                     when (mode) {
-                        AuthMode.LOGIN -> AuthMode.REGISTER
-                        AuthMode.REGISTER, AuthMode.RESET_PASSWORD -> AuthMode.LOGIN
+                        AuthMode.LOGIN -> "Create an account"
+                        AuthMode.REGISTER -> "I already have an account"
+                        AuthMode.RESET_PASSWORD -> "Back to sign in"
                     }
                 )
-            },
-            enabled = !loading,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text(
-                when (mode) {
-                    AuthMode.LOGIN -> "Create an account"
-                    AuthMode.REGISTER -> "I already have an account"
-                    AuthMode.RESET_PASSWORD -> "Back to sign in"
-                }
-            )
+            }
         }
-        if (mode != AuthMode.RESET_PASSWORD) {
+        if (mode != AuthMode.RESET_PASSWORD && !guestTrialExpired) {
             OutlinedButton(onClick = onContinueAsGuest, enabled = !loading, modifier = Modifier.fillMaxWidth()) {
-                Text("Continue as guest")
+                Text(if (upgradingGuest) "Return to guest workspace" else "Continue as guest")
             }
         }
     }

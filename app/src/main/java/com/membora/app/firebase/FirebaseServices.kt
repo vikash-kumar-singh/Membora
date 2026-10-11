@@ -383,7 +383,11 @@ object FirebaseServices {
     }
 
     /** Exchanges a Google ID token for a Firebase session without ever handling a Google password. */
-    fun signInWithGoogleIdToken(idToken: String, onResult: (Result<FirebaseUser>) -> Unit) {
+    fun signInWithGoogleIdToken(
+        idToken: String,
+        preserveAnonymousWorkspace: Boolean = false,
+        onResult: (Result<FirebaseUser>) -> Unit
+    ) {
         val firebaseAuth = auth
             ?: return onResult(Result.failure(IllegalStateException("Firebase Auth is not configured")))
         val credential = GoogleAuthProvider.getCredential(idToken, null)
@@ -426,7 +430,13 @@ object FirebaseServices {
                 analytics?.logEvent("google_account_linked", Bundle())
                 onResult(Result.success(user))
             } else if (task.exception is FirebaseAuthUserCollisionException) {
-                signIn()
+                if (preserveAnonymousWorkspace) {
+                    onResult(Result.failure(IllegalStateException(
+                        "That Google account already has a Membora workspace. Use a new Google account or register a new email to keep this guest workspace."
+                    )))
+                } else {
+                    signIn()
+                }
             } else {
                 onResult(Result.failure(task.exception ?: IllegalStateException("Google sign-in failed")))
             }

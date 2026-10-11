@@ -13,6 +13,8 @@
     .mark { width: 68px; height: 68px; margin: 0 auto 24px; display: grid; place-items: center; border-radius: 20px; background: #176b55; color: white; font-size: 32px; font-weight: 800; }
     h1 { margin: 0; font-size: clamp(2.4rem, 8vw, 4rem); letter-spacing: -.06em; }
     p { margin: 18px auto 0; max-width: 38ch; color: #53635f; font-size: 1.05rem; line-height: 1.65; }
+    nav { display: flex; justify-content: center; gap: 10px; margin-top: 24px; color: #80908a; }
+    a { color: #176b55; text-underline-offset: 3px; }
     small { display: block; margin-top: 32px; color: #76847f; }
   </style>
 </head>
@@ -21,6 +23,11 @@
     <div class="mark" aria-hidden="true">M</div>
     <h1>Membora</h1>
     <p>Memberships, payments, staff, and communication—managed in one secure workspace.</p>
+    <nav aria-label="Legal">
+      <a href="/privacy">Privacy policy</a>
+      <span aria-hidden="true">•</span>
+      <a href="/account-deletion">Delete an account</a>
+    </nav>
     <small>Open the Membora Android app to continue.</small>
   </main>
 </body>

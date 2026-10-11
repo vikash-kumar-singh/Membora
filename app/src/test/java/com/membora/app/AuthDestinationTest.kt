@@ -43,6 +43,27 @@ class AuthDestinationTest {
     }
 
     @Test
+    fun upgradingGuestReturnsToAuthenticationWithoutDroppingAnonymousUser() {
+        assertEquals(
+            AuthDestination.AUTHENTICATION,
+            destination(hasUser = true, isAnonymous = true, guestSessionAccepted = false)
+        )
+    }
+
+    @Test
+    fun expiredGuestCannotReachWorkspaceEvenWhenPreviouslyAccepted() {
+        assertEquals(
+            AuthDestination.AUTHENTICATION,
+            destination(
+                hasUser = true,
+                isAnonymous = true,
+                guestSessionAccepted = true,
+                guestTrialExpired = true
+            )
+        )
+    }
+
+    @Test
     fun localBuildWithoutFirebaseStillReachesWorkspaceAfterSplash() {
         assertEquals(
             AuthDestination.WORKSPACE,
@@ -56,13 +77,15 @@ class AuthDestinationTest {
         authObserved: Boolean = true,
         hasUser: Boolean = false,
         isAnonymous: Boolean = false,
-        guestSessionAccepted: Boolean = false
+        guestSessionAccepted: Boolean = false,
+        guestTrialExpired: Boolean = false
     ) = authDestination(
         firebaseConfigured = firebaseConfigured,
         splashFinished = splashFinished,
         authObserved = authObserved,
         hasUser = hasUser,
         isAnonymous = isAnonymous,
-        guestSessionAccepted = guestSessionAccepted
+        guestSessionAccepted = guestSessionAccepted,
+        guestTrialExpired = guestTrialExpired
     )
 }

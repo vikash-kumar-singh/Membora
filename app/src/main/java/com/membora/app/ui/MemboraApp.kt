@@ -125,11 +125,13 @@ internal fun authDestination(
     authObserved: Boolean,
     hasUser: Boolean,
     isAnonymous: Boolean,
-    guestSessionAccepted: Boolean
+    guestSessionAccepted: Boolean,
+    guestTrialExpired: Boolean = false
 ): AuthDestination = when {
     !splashFinished || (firebaseConfigured && !authObserved) -> AuthDestination.SPLASH
     !firebaseConfigured -> AuthDestination.WORKSPACE
     !hasUser -> AuthDestination.AUTHENTICATION
+    isAnonymous && guestTrialExpired -> AuthDestination.AUTHENTICATION
     isAnonymous && !guestSessionAccepted -> AuthDestination.AUTHENTICATION
     else -> AuthDestination.WORKSPACE
 }
@@ -147,12 +149,48 @@ fun MemboraApp(
     val sessionPreferences = remember(context) {
         context.getSharedPreferences("membora_auth_session", android.content.Context.MODE_PRIVATE)
     }
+    var installationGuestTrialStartedAt by remember {
+        mutableStateOf(
+            sessionPreferences.getLong("guest_trial_started_at", 0L).takeIf { it > 0L }
+        )
+    }
     var guestSessionAccepted by rememberSaveable {
         mutableStateOf(sessionPreferences.getBoolean("guest_session_accepted", false))
     }
     var authObserved by remember(firebaseAuth) { mutableStateOf(firebaseAuth == null) }
     var splashFinished by rememberSaveable { mutableStateOf(false) }
     var signingOut by rememberSaveable { mutableStateOf(false) }
+    var upgradingGuest by rememberSaveable { mutableStateOf(false) }
+    var currentTimeMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(firebaseUser?.uid, firebaseUser?.isAnonymous) {
+        val anonymousUser = firebaseUser?.takeIf { it.isAnonymous } ?: return@LaunchedEffect
+        val earliestStart = listOfNotNull(
+            anonymousUser.metadata?.creationTimestamp?.takeIf { it > 0L },
+            installationGuestTrialStartedAt
+        ).minOrNull() ?: System.currentTimeMillis()
+        if (installationGuestTrialStartedAt != earliestStart) {
+            installationGuestTrialStartedAt = earliestStart
+            sessionPreferences.edit { putLong("guest_trial_started_at", earliestStart) }
+        }
+    }
+
+    LaunchedEffect(firebaseUser?.isAnonymous) {
+        if (firebaseUser?.isAnonymous != true) return@LaunchedEffect
+        while (true) {
+            currentTimeMillis = System.currentTimeMillis()
+            delay(60_000)
+        }
+    }
+
+    val guestTrial = firebaseUser?.takeIf { it.isAnonymous }?.let { anonymousUser ->
+        guestTrialStatus(
+            anonymousUserCreatedAtMillis = anonymousUser.metadata?.creationTimestamp,
+            installationTrialStartedAtMillis = installationGuestTrialStartedAt,
+            nowMillis = currentTimeMillis
+        )
+    }
+    val guestTrialExpired = guestTrial?.isExpired == true
 
     LaunchedEffect(Unit) {
         delay(650)
@@ -195,7 +233,8 @@ fun MemboraApp(
         authObserved = authObserved,
         hasUser = firebaseUser != null,
         isAnonymous = firebaseUser?.isAnonymous == true,
-        guestSessionAccepted = guestSessionAccepted
+        guestSessionAccepted = guestSessionAccepted,
+        guestTrialExpired = guestTrialExpired
     )) {
         AuthDestination.SPLASH -> {
             MemboraSplashScreen()
@@ -203,12 +242,17 @@ fun MemboraApp(
         }
         AuthDestination.AUTHENTICATION -> {
             AuthenticationScreen(
+                upgradingGuest = firebaseUser?.isAnonymous == true && (upgradingGuest || guestTrialExpired),
+                guestTrialExpired = guestTrialExpired,
+                installationGuestTrialStartedAtMillis = installationGuestTrialStartedAt,
                 onContinueAsGuest = {
+                    upgradingGuest = false
                     guestSessionAccepted = true
                     sessionPreferences.edit { putBoolean("guest_session_accepted", true) }
                     firebaseUser = FirebaseServices.auth?.currentUser
                 },
                 onAuthenticated = {
+                    upgradingGuest = false
                     guestSessionAccepted = false
                     sessionPreferences.edit { remove("guest_session_accepted") }
                     firebaseUser = FirebaseServices.auth?.currentUser
@@ -222,8 +266,16 @@ fun MemboraApp(
     NotificationPermissionEffect()
     MemboraApp(
         repository = appViewModel.repository,
+        isGuestSession = firebaseUser?.isAnonymous == true && guestSessionAccepted,
+        guestTrialDaysRemaining = guestTrial?.daysRemaining,
+        onUpgradeGuest = {
+            upgradingGuest = true
+            guestSessionAccepted = false
+            sessionPreferences.edit { remove("guest_session_accepted") }
+        },
         onSignOut = {
             signingOut = true
+            upgradingGuest = false
             guestSessionAccepted = false
             sessionPreferences.edit { remove("guest_session_accepted") }
             FirebaseServices.signOut {
@@ -254,7 +306,13 @@ private fun NotificationPermissionEffect() {
 }
 
 @Composable
-fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
+fun MemboraApp(
+    repository: MemboraRepository,
+    isGuestSession: Boolean = false,
+    guestTrialDaysRemaining: Int? = null,
+    onUpgradeGuest: () -> Unit = {},
+    onSignOut: () -> Unit = {}
+) {
     when (repository.workspaceProvisioningState) {
         WorkspaceProvisioningState.LOADING -> {
             MemboraSplashScreen("Loading your organization")
@@ -384,7 +442,7 @@ fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
                                 RootTab.MEMBERS -> MembersScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.MEMBERS)) })
                                 RootTab.CHECK_IN -> CheckInScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.CHECK_IN)) })
                                 RootTab.PAYMENTS -> PaymentsScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.PAYMENTS)) })
-                                RootTab.MORE -> MoreScreen(repository, onPlans = { open(Destination.Plans) }, onServices = { open(Destination.Services) }, onReports = { open(Destination.Reports) }, onAutomations = { open(Destination.Automations) }, onStaff = { open(Destination.Staff) }, onSettings = { open(Destination.OrganizationSettings) }, onSignOut = onSignOut)
+                                RootTab.MORE -> MoreScreen(repository, onPlans = { open(Destination.Plans) }, onServices = { open(Destination.Services) }, onReports = { open(Destination.Reports) }, onAutomations = { open(Destination.Automations) }, onStaff = { open(Destination.Staff) }, onSettings = { open(Destination.OrganizationSettings) }, isGuestSession = isGuestSession, guestTrialDaysRemaining = guestTrialDaysRemaining, onUpgradeGuest = onUpgradeGuest, onSignOut = onSignOut)
                             }
                             is Destination.MemberDetail -> MemberDetailScreen(repository, screen.memberId, onBack = ::goBack)
                             Destination.AddMember -> AddMemberScreen(repository, onBack = ::goBack, onCreated = { open(Destination.MemberDetail(it, RootTab.MEMBERS)) })

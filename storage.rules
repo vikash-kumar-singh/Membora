@@ -3,7 +3,11 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function signedIn() {
-      return request.auth != null;
+      return request.auth != null && (
+        request.auth.token.firebase.sign_in_provider != "anonymous" ||
+        "email" in request.auth.token ||
+        request.time.toMillis() < request.auth.token.auth_time * 1000 + 1296000000
+      );
     }
 
     function accessId(ownerUid, businessId) {
