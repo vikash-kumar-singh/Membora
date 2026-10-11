@@ -14,6 +14,9 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.temporal.ChronoUnit
+import java.net.URI
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.util.Currency
 import java.util.Locale
 import java.util.UUID
@@ -26,6 +29,14 @@ enum class WorkspaceProvisioningState { LOCAL, LOADING, NEEDS_ORGANIZATION, READ
 class MemboraRepository {
     private var firebaseDataSource: FirebaseWorkspaceDataSource? = null
     private var firebaseUserId: String? = null
+    private var workspaceOwnerUserId: String? = null
+
+    var currentWorkspaceRole by mutableStateOf("Owner")
+        private set
+
+    fun can(permission: WorkspacePermission): Boolean =
+        workspaceProvisioningState == WorkspaceProvisioningState.LOCAL ||
+            permission in permissionsForRole(currentWorkspaceRole)
 
     var serverStatus by mutableStateOf("Connecting")
         private set
@@ -126,9 +137,26 @@ class MemboraRepository {
         workspaceProvisioningState = WorkspaceProvisioningState.LOADING
         workspaceProvisioningError = null
         syncDetails = DataSyncDetails(status = DataSyncStatus.CONNECTING, lastAttemptAt = LocalDateTime.now())
+        FirebaseWorkspaceDataSource.resolveWorkspace(userId, organization.id) { result ->
+            if (firebaseUserId != userId) return@resolveWorkspace
+            result.fold(
+                onSuccess = { access -> connectResolvedWorkspace(userId, access) },
+                onFailure = { error ->
+                    workspaceProvisioningState = WorkspaceProvisioningState.ERROR
+                    workspaceProvisioningError = error.localizedMessage ?: "Unable to resolve workspace access"
+                }
+            )
+        }
+    }
+
+    private fun connectResolvedWorkspace(authenticatedUserId: String, access: WorkspaceAccess) {
+        workspaceOwnerUserId = access.ownerUid
+        currentWorkspaceRole = access.role
+        FirebaseServices.setActiveWorkspace(access.ownerUid)
         firebaseDataSource = FirebaseWorkspaceDataSource(
-            userId = userId,
-            businessId = organization.id,
+            userId = access.ownerUid,
+            authenticatedUserId = authenticatedUserId,
+            businessId = access.businessId,
             onOrganization = {
                 organization = it
                 workspaceProvisioningState = WorkspaceProvisioningState.READY
@@ -142,6 +170,14 @@ class MemboraRepository {
                 if (workspaceProvisioningState == WorkspaceProvisioningState.LOADING) {
                     workspaceProvisioningState = WorkspaceProvisioningState.ERROR
                     workspaceProvisioningError = error.localizedMessage ?: "Unable to load this workspace"
+                }
+            },
+            onAccessChanged = { role, active ->
+                if (!active) {
+                    workspaceProvisioningState = WorkspaceProvisioningState.ERROR
+                    workspaceProvisioningError = "Your staff access has been disabled. Contact the organization owner."
+                } else if (!role.isNullOrBlank()) {
+                    currentWorkspaceRole = role
                 }
             },
             onMembers = { remote -> members.clear(); members.addAll(remote); markAutomationSourceLoaded("members") },
@@ -172,6 +208,9 @@ class MemboraRepository {
         firebaseDataSource?.close()
         firebaseDataSource = null
         firebaseUserId = null
+        workspaceOwnerUserId = null
+        currentWorkspaceRole = "Owner"
+        FirebaseServices.clearActiveWorkspace()
         loadedAutomationSources.clear()
         isAutomationDataReady = true
         workspaceProvisioningState = WorkspaceProvisioningState.LOCAL
@@ -180,7 +219,7 @@ class MemboraRepository {
     }
 
     fun retryFirebaseConnection() {
-        val userId = firebaseUserId ?: FirebaseServices.auth?.currentUser?.uid ?: return
+        val userId = FirebaseServices.auth?.currentUser?.uid ?: firebaseUserId ?: return
         disconnectFirebase()
         connectFirebase(userId)
     }
@@ -577,7 +616,14 @@ class MemboraRepository {
     }
 
     @Synchronized
-    fun recordPayment(memberId: String, membershipId: String?, amount: Double, method: PaymentMethod, notes: String = ""): String {
+    fun recordPayment(
+        memberId: String,
+        membershipId: String?,
+        amount: Double,
+        method: PaymentMethod,
+        notes: String = "",
+        reference: String = ""
+    ): String {
         require(member(memberId) != null) { "Member not found" }
         require(amount > 0.0) { "Payment amount must be greater than zero" }
         val membershipIndex = membershipId?.let { id -> memberships.indexOfFirst { it.id == id && it.memberId == memberId } }
@@ -594,8 +640,8 @@ class MemboraRepository {
                 ChronoUnit.SECONDS.between(it.paidOn, now) in 0..5
         }) { "This payment was already recorded" }
         val id = UUID.randomUUID().toString()
-        val receipt = "RCPT-${currentDate().year}-${(payments.size + 1).toString().padStart(5, '0')}"
-        val payment = Payment(id, organization.id, memberId, membershipId, receipt, amount, method, "", now, PaymentStatus.PAID, notes.trim())
+        val receipt = "RCPT-${currentDate().year}-${id.take(8).uppercase(Locale.ROOT)}"
+        val payment = Payment(id, organization.id, memberId, membershipId, receipt, amount, method, reference.trim(), now, PaymentStatus.PAID, notes.trim())
         payments.add(0, payment)
         firebaseDataSource?.savePayment(payment)
         if (membershipIndex != null && membershipIndex >= 0) {
@@ -711,7 +757,36 @@ Please complete the payment at your convenience. If already paid, please ignore 
         addActivity(draft.memberId, ActivityType.MESSAGE, draft.title, "${channel.pretty()} composer opened")
     }
 
-    fun checkIn(memberId: String): Result<Visit> {
+    fun memberFromQrValue(rawValue: String): Member? {
+        val raw = rawValue.trim()
+        if (raw.isBlank()) return null
+        val candidates = linkedSetOf(raw)
+        Regex("(?i)MEM-[0-9]+").findAll(raw).forEach { candidates += it.value }
+        runCatching { URI(raw) }.getOrNull()?.let { uri ->
+            uri.host?.takeIf(String::isNotBlank)?.let(candidates::add)
+            uri.path?.split('/')?.filter(String::isNotBlank)?.forEach(candidates::add)
+            uri.rawQuery?.split('&')?.forEach { parameter ->
+                parameter.substringAfter('=', "").takeIf(String::isNotBlank)?.let { value ->
+                    runCatching { URLDecoder.decode(value, StandardCharsets.UTF_8.name()) }
+                        .getOrNull()?.let(candidates::add)
+                }
+            }
+        }
+        return members.firstOrNull { member ->
+            candidates.any { candidate ->
+                candidate.equals(member.id, ignoreCase = true) ||
+                    candidate.equals(member.code, ignoreCase = true)
+            }
+        }
+    }
+
+    fun checkInFromQr(rawValue: String): Result<Visit> {
+        val member = memberFromQrValue(rawValue)
+            ?: return Result.failure(IllegalArgumentException("No member matches this QR code"))
+        return checkIn(member.id, method = "QR")
+    }
+
+    fun checkIn(memberId: String, method: String = "MANUAL"): Result<Visit> {
         val member = member(memberId) ?: return Result.failure(IllegalArgumentException("Member not found"))
         val status = memberStatus(memberId)
         if (status !in listOf(MemberStatus.ACTIVE, MemberStatus.EXPIRING_SOON)) {
@@ -719,10 +794,17 @@ Please complete the payment at your convenience. If already paid, please ignore 
         }
         val existing = visits.firstOrNull { it.memberId == memberId && it.checkedOutAt == null && it.checkedInAt.toLocalDate() == currentDate() }
         if (existing != null) return Result.failure(IllegalStateException("${member.fullName} is already checked in"))
-        val visit = Visit(UUID.randomUUID().toString(), organization.id, memberId, currentDateTime())
+        val visit = Visit(
+            UUID.randomUUID().toString(),
+            organization.id,
+            memberId,
+            currentDateTime(),
+            method = method
+        )
         visits.add(0, visit)
         firebaseDataSource?.saveVisit(visit)
-        addActivity(memberId, ActivityType.VISIT, "Checked in", "Manual entry at ${organization.branchName}")
+        val entryMethod = if (method == "QR") "QR scan" else "Manual entry"
+        addActivity(memberId, ActivityType.VISIT, "Checked in", "$entryMethod at ${organization.branchName}")
         return Result.success(visit)
     }
 
@@ -811,6 +893,10 @@ Please complete the payment at your convenience. If already paid, please ignore 
 
     @Synchronized
     fun processDueReminders(today: LocalDate = currentDate()): Int {
+        // A shared workspace can be open on several staff devices. Only the owner executes
+        // scheduled deliveries, preventing one reminder from being submitted under multiple
+        // Firebase identities.
+        if (firebaseDataSource != null && currentWorkspaceRole != "Owner") return 0
         if (!isAutomationDataReady || workspaceProvisioningState == WorkspaceProvisioningState.LOADING) return 0
         var created = 0
         fun queue(
@@ -936,6 +1022,15 @@ Please complete the payment at your convenience. If already paid, please ignore 
     }
 
     @Synchronized
+    fun automaticCommunicationsAwaitingStatus(): List<Communication> = communications.filter {
+        it.status in setOf("SUBMITTED", "SENT") &&
+            it.automationRuleId != null &&
+            it.deliveryKey.isNotBlank() &&
+            it.providerMessageId.isNotBlank() &&
+            it.channel in setOf(CommunicationChannel.WHATSAPP, CommunicationChannel.SMS)
+    }
+
+    @Synchronized
     fun recordAutomaticDeliveryResult(
         communicationId: String,
         status: String,
@@ -944,9 +1039,10 @@ Please complete the payment at your convenience. If already paid, please ignore 
     ) {
         val index = communications.indexOfFirst { it.id == communicationId }
         if (index < 0) return
+        val current = communications[index]
         val updated = communications[index].copy(
             status = status,
-            providerMessageId = providerMessageId,
+            providerMessageId = providerMessageId.ifBlank { current.providerMessageId },
             failureReason = failureReason.take(950)
         )
         communications[index] = updated
@@ -973,7 +1069,9 @@ Please complete the payment at your convenience. If already paid, please ignore 
         city: String = organization.city,
         state: String = organization.state,
         postalCode: String = organization.postalCode,
-        countryCode: String = organization.countryCode
+        countryCode: String = organization.countryCode,
+        taxId: String = organization.taxId,
+        receiptFooter: String = organization.receiptFooter
     ): Result<Unit> = runCatching {
         val normalizedCurrency = currencyCode.trim().uppercase(Locale.ROOT)
         val currency = Currency.getInstance(normalizedCurrency)
@@ -1002,7 +1100,9 @@ Please complete the payment at your convenience. If already paid, please ignore 
             city = city.trim(),
             state = state.trim(),
             postalCode = postalCode.trim(),
-            countryCode = countryCode.trim().uppercase(Locale.ROOT)
+            countryCode = countryCode.trim().uppercase(Locale.ROOT),
+            taxId = taxId.trim(),
+            receiptFooter = receiptFooter.trim().ifBlank { "Thank you for your payment." }
         )
         firebaseDataSource?.saveOrganization(organization)
         addActivity(null, ActivityType.SYSTEM, "Organization settings updated", "Profile, terminology and regional settings saved")
@@ -1106,38 +1206,110 @@ Please complete the payment at your convenience. If already paid, please ignore 
         }
     }
 
+    /** Local/offline variant retained for non-Firebase workspaces and deterministic tests. */
     fun inviteStaff(
         name: String,
         email: String,
         phone: String,
         role: String,
         branchName: String
-    ): Result<String> = runCatching {
-        val normalizedEmail = email.trim().lowercase(Locale.ROOT)
-        require(name.isNotBlank()) { "Staff name is required" }
-        require(normalizedEmail.matches(Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"))) { "Enter a valid staff email" }
-        require(role in staffRoles) { "Select a valid role" }
-        require(branchName.isNotBlank()) { "Branch is required" }
-        require(staff.none { it.email.equals(normalizedEmail, ignoreCase = true) }) {
-            "A staff member with this email already exists"
-        }
-        val member = StaffMember(
+    ): Result<String> = prepareStaffInvitation(name, email, phone, role, branchName).map { member ->
+        require(firebaseDataSource == null) { "Use the email-delivery invitation flow for a connected workspace" }
+        staff.add(member)
+        member.id
+    }
+
+    fun inviteStaff(
+        name: String,
+        email: String,
+        phone: String,
+        role: String,
+        branchName: String,
+        onResult: (Result<String>) -> Unit
+    ) {
+        val prepared = prepareStaffInvitation(name, email, phone, role, branchName)
+        prepared.fold(
+            onFailure = { onResult(Result.failure(it)) },
+            onSuccess = { member ->
+                val dataSource = firebaseDataSource
+                if (dataSource == null) {
+                    onResult(Result.failure(IllegalStateException("Connect to Firebase before inviting staff")))
+                    return@fold
+                }
+                dataSource.createStaffInvitation(member) { result ->
+                    result.fold(
+                        onSuccess = {
+                            val index = staff.indexOfFirst { it.id == member.id }
+                            val sent = member.copy(invitationStatus = "SENT")
+                            if (index >= 0) staff[index] = sent else staff.add(sent)
+                            addActivity(null, ActivityType.SYSTEM, "Staff invitation sent", "${member.email} • ${member.role}")
+                            onResult(Result.success(member.id))
+                        },
+                        onFailure = { error ->
+                            val failed = member.copy(invitationStatus = "DELIVERY_FAILED")
+                            val index = staff.indexOfFirst { it.id == member.id }
+                            if (index >= 0) staff[index] = failed else staff.add(failed)
+                            onResult(Result.failure(error))
+                        }
+                    )
+                }
+            }
+        )
+    }
+
+    private fun prepareStaffInvitation(
+        name: String,
+        email: String,
+        phone: String,
+        role: String,
+        branchName: String
+    ): Result<StaffMember> = runCatching {
+            require(can(WorkspacePermission.MANAGE_STAFF)) { "Your role cannot invite staff" }
+            val normalizedEmail = email.trim().lowercase(Locale.ROOT)
+            require(name.isNotBlank()) { "Staff name is required" }
+            require(normalizedEmail.matches(Regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$"))) { "Enter a valid staff email" }
+            require(role in staffRoles && role != "Owner") { "Select a valid staff role" }
+            require(branchName.isNotBlank()) { "Branch is required" }
+            require(staff.none { it.email.equals(normalizedEmail, ignoreCase = true) }) {
+                "A staff member with this email already exists"
+            }
+            val invitationId = UUID.randomUUID().toString()
+            StaffMember(
             id = UUID.randomUUID().toString(),
             name = name.trim(),
             role = role,
             phone = phone.trim(),
-            active = true,
+            active = false,
             email = normalizedEmail,
             branchName = branchName.trim(),
-            invitationStatus = "PENDING"
+            invitationStatus = "PENDING",
+            invitationId = invitationId
         )
-        staff.add(member)
-        firebaseDataSource?.saveStaff(member)
-        addActivity(null, ActivityType.SYSTEM, "Staff invitation created", "${member.email} • ${member.role}")
-        member.id
+    }
+
+    fun resendStaffInvitation(staffId: String, onResult: (Result<Unit>) -> Unit) {
+        val member = staff.firstOrNull { it.id == staffId }
+            ?: return onResult(Result.failure(IllegalArgumentException("Staff member not found")))
+        if (!can(WorkspacePermission.MANAGE_STAFF)) {
+            onResult(Result.failure(IllegalStateException("Your role cannot manage staff")))
+            return
+        }
+        if (member.invitationStatus == "ACTIVE") {
+            onResult(Result.failure(IllegalStateException("This staff member already has active access")))
+            return
+        }
+        firebaseDataSource?.resendStaffInvitation(member) { result ->
+            result.onSuccess {
+                val index = staff.indexOfFirst { it.id == staffId }
+                if (index >= 0) staff[index] = member.copy(invitationStatus = "SENT")
+                addActivity(null, ActivityType.SYSTEM, "Staff invitation resent", member.email)
+            }
+            onResult(result)
+        } ?: onResult(Result.failure(IllegalStateException("Workspace is not connected")))
     }
 
     fun setStaffActive(staffId: String, active: Boolean): Result<Unit> = runCatching {
+        require(can(WorkspacePermission.MANAGE_STAFF)) { "Your role cannot manage staff" }
         val index = staff.indexOfFirst { it.id == staffId }
         require(index >= 0) { "Staff member not found" }
         require(staff[index].role != "Owner" || active) { "The organization owner cannot be disabled" }
@@ -1146,7 +1318,7 @@ Please complete the payment at your convenience. If already paid, please ignore 
             invitationStatus = if (active) staff[index].invitationStatus.takeUnless { it == "DISABLED" } ?: "ACTIVE" else "DISABLED"
         )
         staff[index] = updated
-        firebaseDataSource?.saveStaff(updated)
+        firebaseDataSource?.setStaffAccess(updated)
         addActivity(null, ActivityType.SYSTEM, if (active) "Staff access enabled" else "Staff access disabled", updated.email)
     }
 

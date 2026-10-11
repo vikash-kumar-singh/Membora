@@ -10,6 +10,84 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    function accessId(ownerUid, businessId) {
+      return ownerUid + "_" + businessId;
+    }
+
+    function accessPath(ownerUid, businessId) {
+      return /databases/$(database)/documents/users/$(request.auth.uid)/workspaceAccess/$(accessId(ownerUid, businessId));
+    }
+
+    function isWorkspaceOwner(ownerUid) {
+      return signedIn() && request.auth.uid == ownerUid;
+    }
+
+    function hasWorkspaceAccess(ownerUid, businessId) {
+      return signedIn() && (
+        isWorkspaceOwner(ownerUid) ||
+        (exists(accessPath(ownerUid, businessId)) &&
+          get(accessPath(ownerUid, businessId)).data.status == "ACTIVE")
+      );
+    }
+
+    function workspaceRole(ownerUid, businessId) {
+      return isWorkspaceOwner(ownerUid)
+        ? "Owner"
+        : get(accessPath(ownerUid, businessId)).data.role;
+    }
+
+    function hasWorkspaceRole(ownerUid, businessId, roles) {
+      return hasWorkspaceAccess(ownerUid, businessId) &&
+        workspaceRole(ownerUid, businessId) in roles;
+    }
+
+    function canManageStaff(ownerUid, businessId) {
+      return hasWorkspaceRole(ownerUid, businessId, ["Owner", "Administrator"]);
+    }
+
+    function inviteAcceptedForCurrentUser(invitationId, ownerUid, businessId, staffId, role, email) {
+      let invitation = getAfter(/databases/$(database)/documents/staffInvitations/$(invitationId));
+      return signedIn() && invitation.data.status == "ACCEPTED" &&
+        invitation.data.acceptedUid == request.auth.uid &&
+        invitation.data.email == request.auth.token.email &&
+        invitation.data.email == email &&
+        invitation.data.ownerUid == ownerUid &&
+        invitation.data.businessId == businessId &&
+        invitation.data.staffId == staffId &&
+        invitation.data.role == role &&
+        invitation.data.expiresAt > request.time;
+    }
+
+    match /staffInvitations/{invitationId} {
+      allow create: if signedIn() &&
+        canManageStaff(request.resource.data.ownerUid, request.resource.data.businessId) &&
+        request.resource.data.staffId is string &&
+        request.resource.data.email is string &&
+        request.resource.data.role in ["Administrator", "Manager", "Front Desk", "Accountant", "Viewer"] &&
+        request.resource.data.status == "PENDING" &&
+        request.resource.data.createdByUid == request.auth.uid;
+
+      allow read: if signedIn() && (
+        canManageStaff(resource.data.ownerUid, resource.data.businessId) ||
+        resource.data.email == request.auth.token.email
+      );
+
+      allow update: if signedIn() && (
+        canManageStaff(resource.data.ownerUid, resource.data.businessId) ||
+        (
+          resource.data.email == request.auth.token.email &&
+          resource.data.status in ["PENDING", "SENT", "DELIVERY_FAILED"] &&
+          resource.data.expiresAt > request.time &&
+          request.resource.data.status == "ACCEPTED" &&
+          request.resource.data.acceptedUid == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(["status", "acceptedUid", "acceptedAt"])
+        )
+      );
+
+      allow delete: if false;
+    }
+
     match /users/{userId} {
       allow read, create, update: if ownsUser(userId);
       allow delete: if false;
@@ -18,11 +96,118 @@ service cloud.firestore {
         allow read, write: if ownsUser(userId);
       }
 
+      match /workspaceAccess/{workspaceId} {
+        allow read: if ownsUser(userId);
+        allow create: if signedIn() &&
+          workspaceId == accessId(request.resource.data.ownerUid, request.resource.data.businessId) && (
+          canManageStaff(request.resource.data.ownerUid, request.resource.data.businessId) ||
+          (
+            userId == request.auth.uid &&
+            request.resource.data.status == "ACTIVE" &&
+            inviteAcceptedForCurrentUser(
+              request.resource.data.invitationId,
+              request.resource.data.ownerUid,
+              request.resource.data.businessId,
+              request.resource.data.staffId,
+              request.resource.data.role,
+              request.resource.data.email
+            )
+          )
+        );
+        allow update: if signedIn() &&
+          request.resource.data.ownerUid == resource.data.ownerUid &&
+          request.resource.data.businessId == resource.data.businessId &&
+          request.resource.data.staffId == resource.data.staffId &&
+          canManageStaff(resource.data.ownerUid, resource.data.businessId);
+        allow delete: if false;
+      }
+
       match /businesses/{businessId} {
-        allow read, write: if ownsUser(userId);
+        allow read: if hasWorkspaceAccess(userId, businessId);
+        allow create: if isWorkspaceOwner(userId);
+        allow update: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator"]);
+        allow delete: if false;
+
+        match /members/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk"]);
+        }
+
+        match /plans/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager"]);
+        }
+
+        match /services/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager"]);
+        }
+
+        match /memberships/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk"]);
+        }
+
+        match /payments/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk", "Accountant"]);
+        }
+
+        match /visits/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk"]);
+        }
+
+        match /entitlements/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk"]);
+        }
+
+        match /commitments/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk"]);
+        }
+
+        match /communications/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager", "Front Desk", "Accountant"]);
+        }
+
+        match /automationRules/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow write: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator", "Manager"]);
+        }
+
+        match /staff/{staffId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow create, delete: if canManageStaff(userId, businessId);
+          allow update: if canManageStaff(userId, businessId) || (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              "active", "invitationStatus", "firebaseUid", "invitationId", "updatedAt"
+            ]) &&
+            request.resource.data.active == true &&
+            request.resource.data.invitationStatus == "ACTIVE" &&
+            request.resource.data.firebaseUid == request.auth.uid &&
+            inviteAcceptedForCurrentUser(
+              request.resource.data.invitationId,
+              userId,
+              businessId,
+              staffId,
+              request.resource.data.role,
+              request.resource.data.email
+            )
+          );
+        }
+
+        match /activities/{documentId} {
+          allow read: if hasWorkspaceAccess(userId, businessId);
+          allow create: if hasWorkspaceAccess(userId, businessId);
+          allow update: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator"]);
+          allow delete: if false;
+        }
 
         match /{document=**} {
-          allow read, write: if ownsUser(userId);
+          allow read, write: if false;
         }
       }
     }

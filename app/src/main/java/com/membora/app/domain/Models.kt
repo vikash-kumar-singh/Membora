@@ -20,7 +20,9 @@ data class Organization(
     val city: String = "",
     val state: String = "",
     val postalCode: String = "",
-    val countryCode: String = "IN"
+    val countryCode: String = "IN",
+    val taxId: String = "",
+    val receiptFooter: String = "Thank you for your payment."
 )
 
 enum class MemberStatus { ACTIVE, EXPIRING_SOON, EXPIRED, UPCOMING, SUSPENDED }
@@ -210,7 +212,9 @@ data class StaffMember(
     val active: Boolean,
     val email: String = "",
     val branchName: String = "Main",
-    val invitationStatus: String = if (active) "ACTIVE" else "DISABLED"
+    val invitationStatus: String = if (active) "ACTIVE" else "DISABLED",
+    val firebaseUid: String = "",
+    val invitationId: String = ""
 )
 
 data class ActivityEvent(

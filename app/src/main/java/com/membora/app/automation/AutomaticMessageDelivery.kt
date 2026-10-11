@@ -18,6 +18,7 @@ data class AutomaticDeliveryReport(
 
 object AutomaticMessageDelivery {
     suspend fun deliverReady(repository: MemboraRepository): AutomaticDeliveryReport {
+        if (repository.currentWorkspaceRole != "Owner") return AutomaticDeliveryReport()
         val user = FirebaseServices.auth?.currentUser ?: return AutomaticDeliveryReport()
         val token = suspendCoroutine<String?> { continuation ->
             user.getIdToken(false).addOnCompleteListener { task ->
@@ -50,11 +51,11 @@ object AutomaticMessageDelivery {
             }
             result.onSuccess { response ->
                 when (response.status) {
-                    "SUBMITTED" -> {
-                        submitted++
+                    "SUBMITTED", "SENT", "DELIVERED", "READ" -> {
+                        if (response.status == "SUBMITTED") submitted++
                         repository.recordAutomaticDeliveryResult(
                             communication.id,
-                            "SUBMITTED",
+                            response.status,
                             response.providerMessageId,
                             ""
                         )
@@ -85,6 +86,40 @@ object AutomaticMessageDelivery {
                     "READY",
                     failureReason = error.message ?: "Automatic delivery failed"
                 )
+            }
+        }
+
+        repository.automaticCommunicationsAwaitingStatus().forEach { communication ->
+            val result = withContext(Dispatchers.IO) {
+                runCatching {
+                    val response = ApiClient.api.automaticDeliveryStatus(
+                        token,
+                        communication.deliveryKey
+                    ).execute()
+                    if (!response.isSuccessful) {
+                        error("Messaging status server returned HTTP ${response.code()}")
+                    }
+                    response.body() ?: error("Messaging status server returned an empty response")
+                }
+            }
+            result.onSuccess { response ->
+                when (response.status) {
+                    "SENT", "DELIVERED", "READ" -> repository.recordAutomaticDeliveryResult(
+                        communication.id,
+                        response.status,
+                        response.providerMessageId,
+                        ""
+                    )
+                    "FAILED" -> repository.recordAutomaticDeliveryResult(
+                        communication.id,
+                        "FAILED",
+                        response.providerMessageId,
+                        response.detail.ifBlank { response.providerStatus }
+                    )
+                    "SUBMITTED", "PENDING" -> retryNeeded = true
+                }
+            }.onFailure {
+                retryNeeded = true
             }
         }
         return AutomaticDeliveryReport(submitted, pendingConfiguration, failed, retryNeeded)

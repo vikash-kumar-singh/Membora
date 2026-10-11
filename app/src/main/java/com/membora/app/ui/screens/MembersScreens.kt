@@ -31,9 +31,11 @@ import androidx.core.content.FileProvider
 import com.membora.app.data.MemboraRepository
 import com.membora.app.data.PreparedUpload
 import com.membora.app.data.UploadCompression
+import com.membora.app.data.WorkspacePermission
 import com.membora.app.data.asMoney
 import com.membora.app.data.pretty
 import com.membora.app.domain.*
+import com.membora.app.receipt.receiptData
 import com.membora.app.ui.components.*
 import java.io.File
 import java.time.LocalDate
@@ -445,7 +447,12 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
     val membership = repository.membershipFor(memberId)
     val plan = membership?.let { repository.plan(it.planId) }
     val outstandingDue = membership?.let { repository.outstandingBalance(it.id) } ?: 0.0
+    val canManageMember = repository.can(WorkspacePermission.MANAGE_MEMBERS)
+    val canManageMembership = repository.can(WorkspacePermission.MANAGE_MEMBERSHIPS)
+    val canRecordPayment = repository.can(WorkspacePermission.RECORD_PAYMENTS)
+    val canCheckIn = repository.can(WorkspacePermission.CHECK_IN_MEMBERS)
     var showPayment by rememberSaveable { mutableStateOf(false) }
+    var receiptPaymentId by rememberSaveable { mutableStateOf<String?>(null) }
     var showRenew by rememberSaveable { mutableStateOf(false) }
     var showFreeze by rememberSaveable { mutableStateOf(false) }
     var showCancelMembership by rememberSaveable { mutableStateOf(false) }
@@ -541,8 +548,17 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
     if (showPayment) PaymentDialog(repository, memberId, membership?.id, onDismiss = { showPayment = false }, onSaved = { paymentId ->
         showPayment = false
         message = "Payment recorded and receipt created"
-        pendingMessageDraft = runCatching { repository.paymentConfirmationDraft(paymentId) }.getOrNull()
+        receiptPaymentId = paymentId
     })
+    receiptPaymentId?.let { paymentId ->
+        runCatching { repository.receiptData(paymentId) }.getOrNull()?.let { receipt ->
+            PaymentReceiptDialog(
+                receipt = receipt,
+                onDismiss = { receiptPaymentId = null },
+                onMessage = { pendingMessageDraft = runCatching { repository.paymentConfirmationDraft(paymentId) }.getOrNull() }
+            )
+        }
+    }
     if (showRenew) RenewDialog(repository, memberId, onDismiss = { showRenew = false }, onSaved = { renewalId ->
         showRenew = false
         message = "Renewal created successfully"
@@ -660,29 +676,29 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
                     }
                 }
             }
-            item {
+            if (canManageMember || canManageMembership || canRecordPayment || canCheckIn) item {
                 BoxWithConstraints(Modifier.fillMaxWidth()) {
                     if (maxWidth < 480.dp) {
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { showEditProfile = true }, Modifier.fillMaxWidth()) { Text("Edit profile") }
-                            Button(onClick = { showPayment = true }, enabled = membership != null && membership.status != MembershipStatus.CANCELLED && membership.paymentStatus != PaymentStatus.PAID, modifier = Modifier.fillMaxWidth()) { Text("Add payment") }
-                            OutlinedButton(onClick = { showRenew = true }, Modifier.fillMaxWidth()) { Text("Renew") }
-                            OutlinedButton(onClick = {
+                            if (canManageMember) OutlinedButton(onClick = { showEditProfile = true }, Modifier.fillMaxWidth()) { Text("Edit profile") }
+                            if (canRecordPayment) Button(onClick = { showPayment = true }, enabled = membership != null && membership.status != MembershipStatus.CANCELLED && membership.paymentStatus != PaymentStatus.PAID, modifier = Modifier.fillMaxWidth()) { Text("Add payment") }
+                            if (canManageMembership) OutlinedButton(onClick = { showRenew = true }, Modifier.fillMaxWidth()) { Text("Renew") }
+                            if (canCheckIn) OutlinedButton(onClick = {
                                 message = repository.checkIn(memberId).fold({ "Check-in successful" }, { it.message ?: "Unable to check in" })
                             }, Modifier.fillMaxWidth()) { Text("Check in") }
                         }
                     } else {
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            OutlinedButton(onClick = { showEditProfile = true }, Modifier.weight(1f)) { Text("Edit profile") }
-                            Button(onClick = { showPayment = true }, enabled = membership != null && membership.status != MembershipStatus.CANCELLED && membership.paymentStatus != PaymentStatus.PAID, modifier = Modifier.weight(1f)) { Text("Add payment") }
-                            OutlinedButton(onClick = { showRenew = true }, Modifier.weight(1f)) { Text("Renew") }
-                            OutlinedButton(onClick = {
+                            if (canManageMember) OutlinedButton(onClick = { showEditProfile = true }, Modifier.weight(1f)) { Text("Edit profile") }
+                            if (canRecordPayment) Button(onClick = { showPayment = true }, enabled = membership != null && membership.status != MembershipStatus.CANCELLED && membership.paymentStatus != PaymentStatus.PAID, modifier = Modifier.weight(1f)) { Text("Add payment") }
+                            if (canManageMembership) OutlinedButton(onClick = { showRenew = true }, Modifier.weight(1f)) { Text("Renew") }
+                            if (canCheckIn) OutlinedButton(onClick = {
                                 message = repository.checkIn(memberId).fold({ "Check-in successful" }, { it.message ?: "Unable to check in" })
                             }, Modifier.weight(1f)) { Text("Check in") }
                         }
                     }
                 }
-                if (outstandingDue > 0.009) {
+                if (outstandingDue > 0.009 && canRecordPayment) {
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = {
@@ -736,7 +752,7 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
                                 style = MaterialTheme.typography.bodyMedium
                             )
                         }
-                        if (membership.status != MembershipStatus.CANCELLED) {
+                        if (membership.status != MembershipStatus.CANCELLED && canManageMembership) {
                             Spacer(Modifier.height(14.dp))
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 if (membership.status == MembershipStatus.FROZEN) {
@@ -808,7 +824,7 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
             item {
                 SectionHeading("Photos & documents")
                 AppCard {
-                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                    if (canManageMember) BoxWithConstraints(Modifier.fillMaxWidth()) {
                         if (maxWidth < 430.dp) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedButton(onClick = { showPhotoSourcePicker = true }, enabled = !uploadInProgress, modifier = Modifier.fillMaxWidth()) { Text("Upload profile photo") }
@@ -922,6 +938,7 @@ fun MemberDetailScreen(repository: MemboraRepository, memberId: String, onBack: 
                                 Text("${payment.method.pretty()} • ${payment.paidOn.toUiDateTime()}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Text("${repository.organization.currencySymbol}${payment.amount.asMoney()}", fontWeight = FontWeight.Bold)
+                            TextButton(onClick = { receiptPaymentId = payment.id }) { Text("Receipt") }
                         }
                         if (index != payments.take(4).lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f))
                     }
@@ -1194,6 +1211,8 @@ private fun PaymentDialog(repository: MemboraRepository, memberId: String, membe
     val outstanding = membershipId?.let(repository::outstandingBalance) ?: 0.0
     var amount by rememberSaveable { mutableStateOf(outstanding.takeIf { it > 0 }?.asMoney().orEmpty()) }
     var method by rememberSaveable { mutableStateOf(PaymentMethod.UPI) }
+    var reference by rememberSaveable { mutableStateOf("") }
+    var notes by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     val parsedAmount = amount.replace(",", "").toDoubleOrNull() ?: 0.0
     AlertDialog(
@@ -1204,8 +1223,10 @@ private fun PaymentDialog(repository: MemboraRepository, memberId: String, membe
                 OutlinedTextField(amount, { amount = it.filter { c -> c.isDigit() || c == '.' } }, label = { Text("Amount") }, prefix = { Text(repository.organization.currencySymbol) }, singleLine = true)
                 Text("Payment method", style = MaterialTheme.typography.labelLarge)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(PaymentMethod.UPI, PaymentMethod.CASH, PaymentMethod.CARD, PaymentMethod.BANK_TRANSFER).forEach { item -> FilterChip(selected = item == method, onClick = { method = item }, label = { Text(item.pretty()) }) }
+                    PaymentMethod.entries.forEach { item -> FilterChip(selected = item == method, onClick = { method = item }, label = { Text(item.pretty()) }) }
                 }
+                if (method != PaymentMethod.CASH) OutlinedTextField(reference, { reference = it }, Modifier.fillMaxWidth(), label = { Text("Transaction / reference ID") }, singleLine = true)
+                OutlinedTextField(notes, { notes = it }, Modifier.fillMaxWidth(), label = { Text("Receipt notes (optional)") }, minLines = 2)
                 if (membershipId != null) Text("Outstanding: ${repository.organization.currencySymbol}${outstanding.asMoney()}", style = MaterialTheme.typography.labelLarge)
                 Text("A numbered receipt will be created automatically.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
@@ -1214,7 +1235,7 @@ private fun PaymentDialog(repository: MemboraRepository, memberId: String, membe
         confirmButton = {
             Button(
                 onClick = {
-                    val paymentId = runCatching { repository.recordPayment(memberId, membershipId, parsedAmount, method) }
+                    val paymentId = runCatching { repository.recordPayment(memberId, membershipId, parsedAmount, method, notes = notes, reference = reference) }
                         .onFailure { error = it.localizedMessage }
                         .getOrNull()
                     if (paymentId != null) onSaved(paymentId)

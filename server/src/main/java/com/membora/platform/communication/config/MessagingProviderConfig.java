@@ -15,10 +15,25 @@ public class MessagingProviderConfig {
     }
 
     @ConfigurationProperties(prefix = "membora.messaging")
-    public record Properties(WhatsApp whatsapp, Sms sms) {
+    public record Properties(WhatsApp whatsapp, Sms sms, Webhooks webhooks) {
         public Properties {
             whatsapp = whatsapp == null ? new WhatsApp("", "", "v23.0", "en", "", "", "", "", "", "", "") : whatsapp;
             sms = sms == null ? new Sms("", "91", "", "", "", "", "", "", "") : sms;
+            webhooks = webhooks == null ? new Webhooks("", "", "") : webhooks;
+        }
+
+        public record Webhooks(String metaVerifyToken, String metaAppSecret, String msg91Token) {
+            public Webhooks {
+                metaVerifyToken = clean(metaVerifyToken);
+                metaAppSecret = clean(metaAppSecret);
+                msg91Token = clean(msg91Token);
+            }
+
+            public boolean metaConfigured() {
+                return configuredValue(metaVerifyToken) && configuredValue(metaAppSecret);
+            }
+
+            public boolean msg91Configured() { return configuredValue(msg91Token); }
         }
 
         public record WhatsApp(
@@ -42,11 +57,11 @@ public class MessagingProviderConfig {
             }
 
             public boolean configured() {
-                return !accessToken.isBlank() && !phoneNumberId.isBlank();
+                return configuredValue(accessToken) && configuredValue(phoneNumberId);
             }
 
             public String templateFor(String key) {
-                return clean(switch (key) {
+                var value = clean(switch (key) {
                     case "membership_expiring" -> membershipExpiringTemplate;
                     case "membership_expired" -> membershipExpiredTemplate;
                     case "payment_due" -> paymentDueTemplate;
@@ -56,6 +71,7 @@ public class MessagingProviderConfig {
                     case "renewal_thanks" -> renewalThanksTemplate;
                     default -> "";
                 });
+                return configuredValue(value) ? value : "";
             }
         }
 
@@ -75,10 +91,10 @@ public class MessagingProviderConfig {
                 defaultCountryCallingCode = clean(defaultCountryCallingCode).isBlank() ? "91" : clean(defaultCountryCallingCode);
             }
 
-            public boolean configured() { return !authKey.isBlank(); }
+            public boolean configured() { return configuredValue(authKey); }
 
             public String templateFor(String key) {
-                return clean(switch (key) {
+                var value = clean(switch (key) {
                     case "membership_expiring" -> membershipExpiringTemplateId;
                     case "membership_expired" -> membershipExpiredTemplateId;
                     case "payment_due" -> paymentDueTemplateId;
@@ -88,9 +104,17 @@ public class MessagingProviderConfig {
                     case "renewal_thanks" -> renewalThanksTemplateId;
                     default -> "";
                 });
+                return configuredValue(value) ? value : "";
             }
         }
 
         private static String clean(String value) { return value == null ? "" : value.trim(); }
+
+        private static boolean configuredValue(String value) {
+            var normalized = clean(value).toLowerCase();
+            return !normalized.isBlank()
+                && !normalized.startsWith("replace-with-")
+                && !normalized.startsWith("${");
+        }
     }
 }

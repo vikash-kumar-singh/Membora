@@ -17,19 +17,36 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.membora.app.data.MemboraRepository
 import com.membora.app.data.asMoney
 import com.membora.app.data.pretty
 import com.membora.app.domain.PaymentMethod
+import com.membora.app.receipt.receiptData
 import com.membora.app.ui.components.*
 
 @Composable
 fun CheckInScreen(repository: MemboraRepository, onOpenMember: (String) -> Unit) {
+    val context = LocalContext.current
     var search by rememberSaveable { mutableStateOf("") }
     var resultMessage by rememberSaveable { mutableStateOf<String?>(null) }
     var success by rememberSaveable { mutableStateOf(false) }
+    var scannerOpen by remember { mutableStateOf(false) }
+    val scannerOptions = remember {
+        GmsBarcodeScannerOptions.Builder()
+            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .enableAutoZoom()
+            .allowManualInput()
+            .build()
+    }
+    val scanner = remember(context, scannerOptions) {
+        GmsBarcodeScanning.getClient(context, scannerOptions)
+    }
     val today = repository.currentDate()
     val matches = if (search.isBlank()) emptyList() else repository.members.filter {
         it.fullName.contains(search, true) || it.code.contains(search, true) || it.mobile.contains(search)
@@ -48,9 +65,40 @@ fun CheckInScreen(repository: MemboraRepository, onOpenMember: (String) -> Unit)
                     }
                     Spacer(Modifier.height(14.dp))
                     Text("Scan member QR", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onPrimary)
-                    Text("Camera scanning can be connected to this flow", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f))
+                    Text("Point the camera at a member QR code", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.75f))
                     Spacer(Modifier.height(12.dp))
-                    OutlinedButton(onClick = { resultMessage = "QR scanner adapter is ready for camera integration"; success = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onPrimary), border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.5f))) { Text("Open scanner") }
+                    OutlinedButton(
+                        onClick = {
+                            scannerOpen = true
+                            scanner.startScan()
+                                .addOnSuccessListener { barcode ->
+                                    scannerOpen = false
+                                    repository.checkInFromQr(barcode.rawValue.orEmpty()).fold(
+                                        onSuccess = { visit ->
+                                            val member = repository.member(visit.memberId)
+                                            success = true
+                                            resultMessage = "${member?.fullName ?: "Member"} checked in successfully"
+                                            search = ""
+                                        },
+                                        onFailure = { error ->
+                                            success = false
+                                            resultMessage = error.message ?: "QR check-in failed"
+                                        }
+                                    )
+                                }
+                                .addOnCanceledListener { scannerOpen = false }
+                                .addOnFailureListener { error ->
+                                    scannerOpen = false
+                                    success = false
+                                    resultMessage = error.localizedMessage
+                                        ?.takeIf(String::isNotBlank)
+                                        ?: "Scanner unavailable. Check Google Play services and try again."
+                                }
+                        },
+                        enabled = !scannerOpen,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.onPrimary),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.5f))
+                    ) { Text(if (scannerOpen) "Opening camera…" else "Open scanner") }
                 }
             }
         }
@@ -106,6 +154,7 @@ fun PaymentsScreen(repository: MemboraRepository, onOpenMember: (String) -> Unit
     var search by rememberSaveable { mutableStateOf("") }
     var method by rememberSaveable { mutableStateOf("All") }
     var showAdd by rememberSaveable { mutableStateOf(false) }
+    var receiptPaymentId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingMessageDraft by remember { mutableStateOf<com.membora.app.domain.MemberMessageDraft?>(null) }
     val methods = listOf("All", "UPI", "Cash", "Card", "Bank transfer")
     val filtered = repository.payments.filter { payment ->
@@ -125,8 +174,17 @@ fun PaymentsScreen(repository: MemboraRepository, onOpenMember: (String) -> Unit
 
     if (showAdd) GeneralPaymentDialog(repository, onDismiss = { showAdd = false }, onSaved = { paymentId ->
         showAdd = false
-        pendingMessageDraft = runCatching { repository.paymentConfirmationDraft(paymentId) }.getOrNull()
+        receiptPaymentId = paymentId
     })
+    receiptPaymentId?.let { paymentId ->
+        runCatching { repository.receiptData(paymentId) }.getOrNull()?.let { receipt ->
+            PaymentReceiptDialog(
+                receipt = receipt,
+                onDismiss = { receiptPaymentId = null },
+                onMessage = { pendingMessageDraft = runCatching { repository.paymentConfirmationDraft(paymentId) }.getOrNull() }
+            )
+        }
+    }
     pendingMessageDraft?.let { draft ->
         MemberMessageDialog(repository, draft) { pendingMessageDraft = null }
     }
@@ -204,6 +262,7 @@ fun PaymentsScreen(repository: MemboraRepository, onOpenMember: (String) -> Unit
                         TextButton(onClick = {
                             pendingMessageDraft = runCatching { repository.paymentConfirmationDraft(payment.id) }.getOrNull()
                         }) { Text("Message") }
+                        TextButton(onClick = { receiptPaymentId = payment.id }) { Text("Receipt") }
                     }
                 }
             }
@@ -217,6 +276,8 @@ private fun GeneralPaymentDialog(repository: MemboraRepository, onDismiss: () ->
     var selectedMemberId by rememberSaveable { mutableStateOf<String?>(null) }
     var amount by rememberSaveable { mutableStateOf("") }
     var method by rememberSaveable { mutableStateOf(PaymentMethod.UPI) }
+    var reference by rememberSaveable { mutableStateOf("") }
+    var notes by rememberSaveable { mutableStateOf("") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     val selectedMember = selectedMemberId?.let(repository::member)
     val selectedMembership = selectedMemberId?.let(repository::membershipFor)?.takeUnless { it.status == com.membora.app.domain.MembershipStatus.CANCELLED }
@@ -238,8 +299,10 @@ private fun GeneralPaymentDialog(repository: MemboraRepository, onDismiss: () ->
                 }
                 OutlinedTextField(amount, { amount = it.filter { c -> c.isDigit() || c == '.' } }, label = { Text("Amount") }, prefix = { Text(repository.organization.currencySymbol) }, singleLine = true)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(PaymentMethod.UPI, PaymentMethod.CASH, PaymentMethod.CARD).forEach { item -> FilterChip(selected = method == item, onClick = { method = item }, label = { Text(item.pretty()) }) }
+                    PaymentMethod.entries.forEach { item -> FilterChip(selected = method == item, onClick = { method = item }, label = { Text(item.pretty()) }) }
                 }
+                if (method != PaymentMethod.CASH) OutlinedTextField(reference, { reference = it }, Modifier.fillMaxWidth(), label = { Text("Transaction / reference ID") }, singleLine = true)
+                OutlinedTextField(notes, { notes = it }, Modifier.fillMaxWidth(), label = { Text("Receipt notes (optional)") }, minLines = 2)
                 if (selectedMember != null) Text(
                     if (selectedMembership == null) "No payable membership" else "Outstanding: ${repository.organization.currencySymbol}${outstanding.asMoney()}",
                     style = MaterialTheme.typography.labelLarge,
@@ -250,7 +313,9 @@ private fun GeneralPaymentDialog(repository: MemboraRepository, onDismiss: () ->
         },
         confirmButton = { Button(onClick = {
             if (selectedMember != null && selectedMembership != null) {
-                val paymentId = runCatching { repository.recordPayment(selectedMember.id, selectedMembership.id, parsedAmount, method) }
+                val paymentId = runCatching {
+                    repository.recordPayment(selectedMember.id, selectedMembership.id, parsedAmount, method, notes = notes, reference = reference)
+                }
                     .onFailure { error = it.localizedMessage }
                     .getOrNull()
                 if (paymentId != null) onSaved(paymentId)

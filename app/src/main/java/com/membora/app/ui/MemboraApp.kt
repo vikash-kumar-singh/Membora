@@ -36,6 +36,7 @@ import com.membora.app.BuildConfig
 import com.membora.app.data.MemboraRepository
 import com.membora.app.data.MemboraViewModel
 import com.membora.app.data.WorkspaceProvisioningState
+import com.membora.app.data.WorkspacePermission
 import com.membora.app.firebase.FirebaseServices
 import com.membora.app.ui.components.BrandMark
 import com.membora.app.ui.screens.*
@@ -134,7 +135,10 @@ internal fun authDestination(
 }
 
 @Composable
-fun MemboraApp() {
+fun MemboraApp(
+    incomingEmailLink: String? = null,
+    onEmailLinkConsumed: () -> Unit = {}
+) {
     val appViewModel: MemboraViewModel = viewModel()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -167,6 +171,21 @@ fun MemboraApp() {
 
     if (signingOut) {
         MemboraSplashScreen("Signing out securely")
+        return
+    }
+
+    if (splashFinished && FirebaseServices.isStaffInvitationLink(incomingEmailLink)) {
+        StaffInvitationAcceptanceScreen(
+            emailLink = incomingEmailLink.orEmpty(),
+            onAccepted = {
+                guestSessionAccepted = false
+                sessionPreferences.edit { remove("guest_session_accepted") }
+                firebaseUser = FirebaseServices.auth?.currentUser
+                onEmailLinkConsumed()
+                appViewModel.repository.retryFirebaseConnection()
+            },
+            onCancel = onEmailLinkConsumed
+        )
         return
     }
 
@@ -275,6 +294,14 @@ fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
     }
 
     val root = destination as? Destination.Root
+    val availableRootTabs = RootTab.entries.filter { tab ->
+        when (tab) {
+            RootTab.HOME, RootTab.MORE -> true
+            RootTab.MEMBERS -> repository.can(WorkspacePermission.READ_MEMBERS)
+            RootTab.CHECK_IN -> repository.can(WorkspacePermission.CHECK_IN_MEMBERS)
+            RootTab.PAYMENTS -> repository.can(WorkspacePermission.RECORD_PAYMENTS)
+        }
+    }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val useNavigationRail = root != null && shouldUseNavigationRail(maxWidth, maxHeight)
         Row(Modifier.fillMaxSize()) {
@@ -286,7 +313,7 @@ fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
                     }
                 ) {
                     Spacer(Modifier.weight(1f))
-                    RootTab.entries.forEach { tab ->
+                    availableRootTabs.forEach { tab ->
                         NavigationRailItem(
                             selected = root?.tab == tab,
                             onClick = { openTab(tab) },
@@ -312,7 +339,7 @@ fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
                             containerColor = MaterialTheme.colorScheme.surface,
                             tonalElevation = 0.dp
                         ) {
-                            RootTab.entries.forEach { tab ->
+                            availableRootTabs.forEach { tab ->
                                 NavigationBarItem(
                                     selected = root.tab == tab,
                                     onClick = { openTab(tab) },
@@ -331,7 +358,7 @@ fun MemboraApp(repository: MemboraRepository, onSignOut: () -> Unit = {}) {
                     }
                 },
                 floatingActionButton = {
-                    if (root?.tab == RootTab.MEMBERS) {
+                    if (root?.tab == RootTab.MEMBERS && repository.can(WorkspacePermission.MANAGE_MEMBERS)) {
                         ExtendedFloatingActionButton(
                             onClick = { open(Destination.AddMember) },
                             text = { Text("Add member") },

@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import com.membora.app.data.MemboraRepository
 import com.membora.app.data.DataSyncStatus
 import com.membora.app.data.UploadCompression
+import com.membora.app.data.WorkspacePermission
 import com.membora.app.data.asMoney
 import com.membora.app.data.pretty
 import com.membora.app.domain.MemberStatus
@@ -56,6 +57,10 @@ fun DashboardScreen(
     onOpenMember: (String) -> Unit,
     onReports: () -> Unit
 ) {
+    val canManageMembers = repository.can(WorkspacePermission.MANAGE_MEMBERS)
+    val canCheckIn = repository.can(WorkspacePermission.CHECK_IN_MEMBERS)
+    val canViewReports = repository.can(WorkspacePermission.VIEW_REPORTS)
+    val canManageOrganization = repository.can(WorkspacePermission.MANAGE_ORGANIZATION)
     var showNotificationStatus by rememberSaveable { mutableStateOf(false) }
     var logoUploading by rememberSaveable { mutableStateOf(false) }
     var logoMessage by rememberSaveable { mutableStateOf<String?>(null) }
@@ -102,12 +107,14 @@ fun DashboardScreen(
             subtitle = "Organization logo",
             imageModel = repository.organization.logoUrl,
             contentScale = ContentScale.Fit,
-            imageActionLabel = if (logoUploading) "Uploading…" else "Change organization logo",
+            imageActionLabel = if (canManageOrganization) {
+                if (logoUploading) "Uploading…" else "Change organization logo"
+            } else null,
             imageActionEnabled = !logoUploading,
-            onImageAction = {
+            onImageAction = if (canManageOrganization) {{
                 showOrganizationLogo = false
                 logoPicker.launch("image/*")
-            },
+            }} else null,
             onDismiss = { showOrganizationLogo = false }
         )
     }
@@ -157,7 +164,8 @@ fun DashboardScreen(
                 logoMessage = logoMessage,
                 onChooseLogo = { logoPicker.launch("image/*") },
                 onViewLogo = { showOrganizationLogo = true },
-                onDismissMessage = { logoMessage = null }
+                onDismissMessage = { logoMessage = null },
+                editable = canManageOrganization
             )
         }
         item {
@@ -180,13 +188,13 @@ fun DashboardScreen(
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
                         if (maxWidth < 350.dp) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                DashboardPrimaryAction(onAddMember, Modifier.fillMaxWidth())
-                                DashboardCheckInAction(onCheckIn, Modifier.fillMaxWidth())
+                                if (canManageMembers) DashboardPrimaryAction(onAddMember, Modifier.fillMaxWidth())
+                                if (canCheckIn) DashboardCheckInAction(onCheckIn, Modifier.fillMaxWidth())
                             }
                         } else {
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                DashboardPrimaryAction(onAddMember)
-                                DashboardCheckInAction(onCheckIn)
+                                if (canManageMembers) DashboardPrimaryAction(onAddMember)
+                                if (canCheckIn) DashboardCheckInAction(onCheckIn)
                             }
                         }
                     }
@@ -194,7 +202,7 @@ fun DashboardScreen(
             }
         }
         item {
-            SectionHeading("Today", "View reports", onReports)
+            SectionHeading("Today", if (canViewReports) "View reports" else null, if (canViewReports) onReports else null)
             Spacer(Modifier.height(10.dp))
             DashboardMetrics(
                 active = active,
@@ -208,9 +216,9 @@ fun DashboardScreen(
             SectionHeading("Quick actions")
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                QuickAction(Icons.Rounded.Add, "Add member", BrandBlue, onAddMember, Modifier.weight(1f))
-                QuickAction(Icons.Rounded.QrCodeScanner, "Check in", BrandGreen, onCheckIn, Modifier.weight(1f))
-                QuickAction(Icons.Rounded.BarChart, "Reports", BrandCyan, onReports, Modifier.weight(1f))
+                if (canManageMembers) QuickAction(Icons.Rounded.Add, "Add member", BrandBlue, onAddMember, Modifier.weight(1f))
+                if (canCheckIn) QuickAction(Icons.Rounded.QrCodeScanner, "Check in", BrandGreen, onCheckIn, Modifier.weight(1f))
+                if (canViewReports) QuickAction(Icons.Rounded.BarChart, "Reports", BrandCyan, onReports, Modifier.weight(1f))
             }
         }
         item { SectionHeading("Needs attention", "All members", onOpenMembers) }
@@ -242,7 +250,8 @@ private fun OrganizationBrandHeader(
     logoMessage: String?,
     onChooseLogo: () -> Unit,
     onViewLogo: () -> Unit,
-    onDismissMessage: () -> Unit
+    onDismissMessage: () -> Unit,
+    editable: Boolean
 ) {
     val organization = repository.organization
     val sync = repository.syncDetails
@@ -272,7 +281,7 @@ private fun OrganizationBrandHeader(
                     modifier = Modifier
                         .size(92.dp)
                         .then(
-                            if (!logoUploading) {
+                            if (!logoUploading && (organization.logoUrl.isNotBlank() || editable)) {
                                 Modifier.clickable(
                                     onClickLabel = if (organization.logoUrl.isBlank()) "Upload organization logo" else "View organization logo",
                                     onClick = if (organization.logoUrl.isBlank()) onChooseLogo else onViewLogo
@@ -355,7 +364,7 @@ private fun OrganizationBrandHeader(
                     }
                 }
             }
-            if (organization.logoUrl.isBlank()) {
+            if (organization.logoUrl.isBlank() && editable) {
                 Spacer(Modifier.height(16.dp))
                 OutlinedButton(
                     onClick = onChooseLogo,

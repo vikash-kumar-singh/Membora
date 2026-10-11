@@ -14,7 +14,9 @@ public class ImageKitConfig {
     @Bean
     ImageKitClient imageKitClient(Properties properties) {
         return ImageKitOkHttpClient.builder()
-            .privateKey(properties.requiredPrivateKey())
+            // ImageKit only serves legacy files. Keep the API available when it is not configured;
+            // individual ImageKit operations still fail closed through requiredPrivateKey().
+            .privateKey(properties.privateKey().isBlank() ? "imagekit-disabled" : properties.privateKey())
             .build();
     }
 

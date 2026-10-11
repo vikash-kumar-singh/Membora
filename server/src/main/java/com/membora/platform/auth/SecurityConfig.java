@@ -43,7 +43,8 @@ public class SecurityConfig {
                                              Converter<Jwt, ? extends AbstractAuthenticationToken> converter) throws Exception {
         return http.csrf(csrf -> csrf.disable()).sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/actuator/health", "/api/v1/auth/**").permitAll()
+                .requestMatchers("/health", "/actuator/health", "/api/v1/auth/**").permitAll()
+                .requestMatchers("/api/v1/webhooks/**").permitAll()
                 .requestMatchers("/api/v1/media/**").permitAll()
                 .requestMatchers("/api/v1/communications/**").permitAll()
                 .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/organizations").permitAll()

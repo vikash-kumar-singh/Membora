@@ -15,6 +15,7 @@ membora:
   firebase:
     project-id: ${FIREBASE_PROJECT_ID}
   imagekit:
-    private-key: ${IMAGEKIT_PRIVATE_KEY}
-    public-key: ${IMAGEKIT_PUBLIC_KEY}
-    url-endpoint: ${IMAGEKIT_URL_ENDPOINT}
+    # Optional legacy-media integration. New Android uploads use Firebase Storage.
+    private-key: ${IMAGEKIT_PRIVATE_KEY:}
+    public-key: ${IMAGEKIT_PUBLIC_KEY:public_cNDr0TfiDtmw5Dgx+VVpRBo7+C4=}
+    url-endpoint: ${IMAGEKIT_URL_ENDPOINT:https://ik.imagekit.io/membora}

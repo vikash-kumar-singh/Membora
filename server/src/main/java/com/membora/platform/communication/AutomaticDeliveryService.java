@@ -3,14 +3,17 @@ package com.membora.platform.communication;
 import com.membora.platform.communication.config.MessagingProviderConfig;
 import com.membora.platform.communication.dto.AutomaticDeliveryRequest;
 import com.membora.platform.communication.dto.AutomaticDeliveryResponse;
+import com.membora.platform.communication.dto.AutomaticDeliveryStatusResponse;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class AutomaticDeliveryService {
@@ -31,9 +34,9 @@ public class AutomaticDeliveryService {
     @Transactional
     public AutomaticDeliveryResponse deliver(String firebaseUserId, AutomaticDeliveryRequest request) {
         var existing = deliveries.findByFirebaseUserIdAndDeliveryKey(firebaseUserId, request.deliveryKey()).orElse(null);
-        if (existing != null && "SUBMITTED".equals(existing.status)) {
-            return new AutomaticDeliveryResponse("SUBMITTED", existing.providerMessageId,
-                "This reminder was already submitted", false, true);
+        if (existing != null && List.of("SUBMITTED", "SENT", "DELIVERED", "READ").contains(existing.status)) {
+            return new AutomaticDeliveryResponse(existing.status, existing.providerMessageId,
+                "This reminder was already accepted by the provider", false, true);
         }
 
         final String recipient;
@@ -74,6 +77,19 @@ public class AutomaticDeliveryService {
             deliveries.save(delivery);
             return new AutomaticDeliveryResponse("FAILED", "", delivery.errorDetail, true, false);
         }
+    }
+
+    @Transactional(readOnly = true)
+    public AutomaticDeliveryStatusResponse status(String firebaseUserId, String deliveryKey) {
+        var delivery = deliveries.findByFirebaseUserIdAndDeliveryKey(firebaseUserId, deliveryKey)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Delivery was not found"));
+        return new AutomaticDeliveryStatusResponse(
+            delivery.status,
+            delivery.providerMessageId == null ? "" : delivery.providerMessageId,
+            delivery.providerStatus == null ? "" : delivery.providerStatus,
+            delivery.errorDetail == null ? "" : delivery.errorDetail,
+            delivery.updatedAt
+        );
     }
 
     private boolean providerConfigured(String channel) {
@@ -124,7 +140,7 @@ public class AutomaticDeliveryService {
             target.put("VAR" + (index + 1), parameters.get(index));
         }
         var body = Map.of(
-            "template_id", templateId,
+            "flow_id", templateId,
             "short_url", "0",
             "realTimeResponse", "1",
             "recipients", List.of(target)

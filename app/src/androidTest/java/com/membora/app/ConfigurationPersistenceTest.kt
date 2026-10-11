@@ -7,9 +7,8 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.membora.app.data.MemboraViewModel
-import com.membora.app.domain.NewMemberRequest
-import com.membora.app.domain.PaymentMethod
-import org.junit.Assert.assertNotNull
+import com.membora.app.data.MemboraRepository
+import org.junit.Assert.assertSame
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -25,31 +24,18 @@ class ConfigurationPersistenceTest {
             )
         }
 
-        lateinit var memberId: String
+        lateinit var repositoryBeforeRecreation: MemboraRepository
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-
             scenario.onActivity { activity ->
                 val viewModel = ViewModelProvider(activity)[MemboraViewModel::class.java]
-                memberId = viewModel.repository.addMember(
-                    NewMemberRequest(
-                        firstName = "Rotation",
-                        lastName = "Test",
-                        mobile = "9999900000",
-                        email = "rotation@example.com",
-                        city = "Bengaluru",
-                        emergencyContact = "",
-                        planId = null,
-                        paymentAmount = 0.0,
-                        paymentMethod = PaymentMethod.UPI
-                    )
-                )
+                repositoryBeforeRecreation = viewModel.repository
             }
 
             scenario.recreate()
 
             scenario.onActivity { activity ->
                 val viewModel = ViewModelProvider(activity)[MemboraViewModel::class.java]
-                assertNotNull(viewModel.repository.member(memberId))
+                assertSame(repositoryBeforeRecreation, viewModel.repository)
             }
         }
     }

@@ -1,9 +1,32 @@
+import java.io.File
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
 val firebaseConfigured = file("google-services.json").exists()
+val releaseSigningProperties = Properties()
+val releaseSigningPropertiesFile = rootProject.file("keystore.properties")
+if (releaseSigningPropertiesFile.isFile) {
+    releaseSigningPropertiesFile.inputStream().use(releaseSigningProperties::load)
+}
+
+fun releaseSigningValue(propertyName: String, environmentName: String): String =
+    releaseSigningProperties.getProperty(propertyName)?.trim()?.takeIf(String::isNotEmpty)
+        ?: providers.environmentVariable(environmentName).orNull?.trim().orEmpty()
+
+val releaseStoreFile = releaseSigningValue("storeFile", "MEMBORA_RELEASE_STORE_FILE")
+val releaseStorePassword = releaseSigningValue("storePassword", "MEMBORA_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = releaseSigningValue("keyAlias", "MEMBORA_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = releaseSigningValue("keyPassword", "MEMBORA_RELEASE_KEY_PASSWORD")
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all(String::isNotBlank)
 val imageKitPublicKey = providers.gradleProperty("IMAGEKIT_PUBLIC_KEY")
     .orElse(providers.environmentVariable("IMAGEKIT_PUBLIC_KEY"))
     .orElse("public_cNDr0TfiDtmw5Dgx+VVpRBo7+C4=")
@@ -41,12 +64,28 @@ android {
         }
     }
 
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             // Works on emulators and physical devices through `adb reverse tcp:8080 tcp:8080`.
             buildConfigField("String", "API_BASE_URL", "\"http://127.0.0.1:8080/\"")
         }
         release {
+            signingConfig = signingConfigs.findByName("release")
             optimization {
                 enable = false
             }
@@ -61,6 +100,24 @@ android {
         compose = true
         buildConfig = true
     }
+}
+
+val verifyReleaseSigning by tasks.registering {
+    group = "verification"
+    description = "Fails release packaging when the production signing identity is unavailable."
+    inputs.property("releaseSigningConfigured", releaseSigningConfigured)
+    inputs.property("releaseStoreFile", rootProject.file(releaseStoreFile).absolutePath)
+    doLast {
+        val configured = inputs.properties["releaseSigningConfigured"] as Boolean
+        val configuredStoreFile = inputs.properties["releaseStoreFile"] as String
+        check(configured && File(configuredStoreFile).isFile) {
+            "Release signing is not configured. Add ignored keystore.properties or the MEMBORA_RELEASE_* environment variables."
+        }
+    }
+}
+
+tasks.matching { it.name == "packageRelease" || it.name == "bundleRelease" }.configureEach {
+    dependsOn(verifyReleaseSigning)
 }
 
 dependencies {
@@ -91,6 +148,7 @@ dependencies {
     implementation(libs.imagekit.android)
     implementation(libs.ucrop)
     implementation(libs.androidx.work.runtime.ktx)
+    implementation(libs.google.code.scanner)
     coreLibraryDesugaring(libs.desugar.jdk.libs)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

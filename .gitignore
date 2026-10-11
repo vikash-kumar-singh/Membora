@@ -10,9 +10,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+keystore.properties
 app/google-services.json
 .env
 server/.env
+.firebase/
 *.jks
 *.keystore
 *.p12

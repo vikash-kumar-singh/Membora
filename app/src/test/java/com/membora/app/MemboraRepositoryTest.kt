@@ -8,6 +8,7 @@ import com.membora.app.domain.MembershipStatus
 import com.membora.app.domain.NewMemberRequest
 import com.membora.app.domain.PaymentMethod
 import com.membora.app.domain.PaymentStatus
+import com.membora.app.receipt.receiptData
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.LocalDate
@@ -215,6 +216,29 @@ class MemboraRepositoryTest {
     }
 
     @Test
+    fun qrCheckInResolvesMemberCodeAndRecordsQrMethod() {
+        val repository = MemboraRepository()
+
+        val result = repository.checkInFromQr("membora://member/MEM-001002")
+
+        assertTrue(result.isSuccess)
+        assertEquals("m-2", result.getOrThrow().memberId)
+        assertEquals("QR", result.getOrThrow().method)
+    }
+
+    @Test
+    fun invalidQrDoesNotCreateAVisit() {
+        val repository = MemboraRepository()
+        val visitCount = repository.visits.size
+
+        val result = repository.checkInFromQr("membora://member/UNKNOWN")
+
+        assertTrue(result.isFailure)
+        assertEquals(visitCount, repository.visits.size)
+        assertTrue(result.exceptionOrNull()?.message?.contains("No member") == true)
+    }
+
+    @Test
     fun renewalStartsAfterCurrentTerm() {
         val repository = MemboraRepository()
         val currentEnd = repository.membershipFor("m-1")!!.endDate
@@ -297,6 +321,41 @@ class MemboraRepositoryTest {
                 it.memberId == "m-3" && it.membershipId == "ms-3" &&
                     it.amount == 100.0 && it.method == PaymentMethod.UPI && it.notes == "Front desk"
             }
+        )
+    }
+
+    @Test
+    fun receiptContainsMembershipPaymentAndBalanceDetails() {
+        val repository = MemboraRepository()
+        val paymentId = repository.recordPayment(
+            "m-3",
+            "ms-3",
+            100.0,
+            PaymentMethod.UPI,
+            notes = "Counter payment",
+            reference = "UPI-TEST-100"
+        )
+
+        val receipt = repository.receiptData(paymentId)
+
+        assertEquals("Arjun Nair", receipt.memberName)
+        assertEquals("Complete Annual", receipt.planName)
+        assertEquals(100.0, receipt.amountReceived, 0.001)
+        assertEquals(10_100.0, receipt.cumulativePaid, 0.001)
+        assertEquals(4_899.0, receipt.balanceAfterPayment, 0.001)
+        assertEquals("UPI-TEST-100", receipt.paymentReference)
+        assertEquals("Counter payment", receipt.notes)
+    }
+
+    @Test
+    fun receiptNumbersStayUniqueWithoutDependingOnListSize() {
+        val repository = MemboraRepository()
+        val first = repository.recordPayment("m-3", "ms-3", 10.0, PaymentMethod.CASH)
+        val second = repository.recordPayment("m-3", "ms-3", 20.0, PaymentMethod.CARD)
+
+        assertNotEquals(
+            repository.payments.first { it.id == first }.receiptNumber,
+            repository.payments.first { it.id == second }.receiptNumber
         )
     }
 

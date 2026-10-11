@@ -75,6 +75,74 @@ fun MemboraSplashScreen(message: String = "Preparing your workspace") {
 }
 
 @Composable
+fun StaffInvitationAcceptanceScreen(
+    emailLink: String,
+    onAccepted: () -> Unit,
+    onCancel: () -> Unit
+) {
+    var email by rememberSaveable { mutableStateOf("") }
+    var loading by rememberSaveable { mutableStateOf(false) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+
+    Box(
+        Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier.widthIn(max = 520.dp).fillMaxWidth(),
+            shape = RoundedCornerShape(28.dp),
+            tonalElevation = 2.dp
+        ) {
+            Column(Modifier.padding(28.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                BrandMark(small = true)
+                Text("Accept staff invitation", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                Text(
+                    "Enter the exact email address that received this link. Membora will authenticate it and open the organization with your assigned role.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = email,
+                    onValueChange = { email = it; error = null },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Invited email") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                    singleLine = true,
+                    enabled = !loading
+                )
+                error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                Button(
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !loading,
+                    onClick = {
+                        if (!Patterns.EMAIL_ADDRESS.matcher(email.trim()).matches()) {
+                            error = "Enter the email address that received the invitation."
+                            return@Button
+                        }
+                        loading = true
+                        FirebaseServices.acceptStaffInvitation(email, emailLink) { result ->
+                            loading = false
+                            result.fold(
+                                onSuccess = { onAccepted() },
+                                onFailure = { error = it.localizedMessage ?: "Unable to accept this invitation" }
+                            )
+                        }
+                    }
+                ) {
+                    if (loading) {
+                        CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    Text(if (loading) "Joining…" else "Accept and sign in")
+                }
+                TextButton(onClick = onCancel, enabled = !loading, modifier = Modifier.align(Alignment.End)) {
+                    Text("Cancel")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun AuthenticationScreen(onContinueAsGuest: () -> Unit, onAuthenticated: () -> Unit) {
     val context = LocalContext.current
     val googleWebClientId = stringResource(R.string.default_web_client_id)

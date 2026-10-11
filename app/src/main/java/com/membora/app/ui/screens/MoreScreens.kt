@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.membora.app.data.MemboraRepository
+import com.membora.app.data.WorkspacePermission
 import com.membora.app.automation.AutomationScheduler
 import com.membora.app.data.DataSyncStatus
 import com.membora.app.data.UploadCompression
@@ -62,14 +63,24 @@ fun MoreScreen(
     onSignOut: () -> Unit
 ) {
     var syncMessage by rememberSaveable { mutableStateOf<String?>(null) }
-    val items = listOf(
-        MoreItem(Icons.Rounded.AccountTree, "Plans", "Durations, prices and bundled services", MaterialTheme.colorScheme.primary, onPlans),
-        MoreItem(Icons.Rounded.Stars, "Services & benefits", "Configurable entitlements and add-ons", MaterialTheme.colorScheme.tertiary, onServices),
-        MoreItem(Icons.Rounded.BarChart, "Reports", "Revenue, members and attendance", Color(0xFF6A5ACD), onReports),
-        MoreItem(Icons.Rounded.AutoAwesome, "Automations", "Expiry reminders and message templates", MaterialTheme.colorScheme.secondary, onAutomations),
-        MoreItem(Icons.Rounded.Groups, "Staff & access", "Roles and organization permissions", Color(0xFFB34F7B), onStaff),
-        MoreItem(Icons.Rounded.Settings, "Organization", "Profile, terminology and branch settings", Color(0xFF4C718F), onSettings)
-    )
+    val items = buildList {
+        if (repository.can(WorkspacePermission.MANAGE_CATALOG)) {
+            add(MoreItem(Icons.Rounded.AccountTree, "Plans", "Durations, prices and bundled services", MaterialTheme.colorScheme.primary, onPlans))
+            add(MoreItem(Icons.Rounded.Stars, "Services & benefits", "Configurable entitlements and add-ons", MaterialTheme.colorScheme.tertiary, onServices))
+        }
+        if (repository.can(WorkspacePermission.VIEW_REPORTS)) {
+            add(MoreItem(Icons.Rounded.BarChart, "Reports", "Revenue, members and attendance", Color(0xFF6A5ACD), onReports))
+        }
+        if (repository.can(WorkspacePermission.MANAGE_AUTOMATIONS)) {
+            add(MoreItem(Icons.Rounded.AutoAwesome, "Automations", "Expiry reminders and message templates", MaterialTheme.colorScheme.secondary, onAutomations))
+        }
+        if (repository.can(WorkspacePermission.MANAGE_STAFF)) {
+            add(MoreItem(Icons.Rounded.Groups, "Staff & access", "Roles and organization permissions", Color(0xFFB34F7B), onStaff))
+        }
+        if (repository.can(WorkspacePermission.MANAGE_ORGANIZATION)) {
+            add(MoreItem(Icons.Rounded.Settings, "Organization", "Profile, terminology and branch settings", Color(0xFF4C718F), onSettings))
+        }
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(PagePadding), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item {
             EnterprisePageHeader("Workspace", "Configure ${repository.organization.name}")
@@ -90,7 +101,7 @@ fun MoreScreen(
                         Text(repository.organization.name, style = MaterialTheme.typography.titleMedium)
                         Text("${repository.organization.businessType} • ${repository.organization.branchName}", style = MaterialTheme.typography.bodyMedium)
                     }
-                    Text("Owner", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    Text(repository.currentWorkspaceRole, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
                 }
             }
         }
@@ -519,7 +530,7 @@ fun StaffScreen(repository: MemboraRepository, onBack: () -> Unit) {
             onDismiss = { showInvite = false },
             onInvited = {
                 showInvite = false
-                message = "Staff invitation saved"
+                message = "Invitation email sent"
             }
         )
     }
@@ -573,8 +584,19 @@ fun StaffScreen(repository: MemboraRepository, onBack: () -> Unit) {
                                         message = it.localizedMessage ?: "Unable to change access"
                                     }
                                 },
-                                enabled = staff.role != "Owner"
+                                enabled = staff.role != "Owner" && staff.firebaseUid.isNotBlank()
                             )
+                        }
+                        if (staff.invitationStatus in setOf("PENDING", "SENT", "DELIVERY_FAILED")) {
+                            TextButton(onClick = {
+                                message = "Sending invitation…"
+                                repository.resendStaffInvitation(staff.id) { result ->
+                                    message = result.fold(
+                                        { "Invitation email resent to ${staff.email}" },
+                                        { it.localizedMessage ?: "Unable to resend invitation" }
+                                    )
+                                }
+                            }) { Text(if (staff.invitationStatus == "DELIVERY_FAILED") "Retry email" else "Resend invitation") }
                         }
                     }
                 }
@@ -608,12 +630,13 @@ private fun InviteStaffDialog(repository: MemboraRepository, onDismiss: () -> Un
     var branch by rememberSaveable { mutableStateOf(repository.organization.branchName) }
     var role by rememberSaveable { mutableStateOf("Front Desk") }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
+    var sending by rememberSaveable { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Invite staff member") },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("An invitation record will be created for secure server-side email delivery.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("A secure sign-in link will be emailed to this address and expires in 7 days.", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(name, { name = it; error = null }, Modifier.fillMaxWidth(), label = { Text("Full name") }, singleLine = true)
                 OutlinedTextField(email, { email = it; error = null }, Modifier.fillMaxWidth(), label = { Text("Work email") }, singleLine = true)
                 OutlinedTextField(phone, { phone = it }, Modifier.fillMaxWidth(), label = { Text("Phone") }, singleLine = true)
@@ -628,12 +651,26 @@ private fun InviteStaffDialog(repository: MemboraRepository, onDismiss: () -> Un
             }
         },
         confirmButton = {
-            Button(onClick = {
-                repository.inviteStaff(name, email, phone, role, branch).fold(
-                    onSuccess = { onInvited() },
-                    onFailure = { error = it.localizedMessage ?: "Unable to invite staff" }
-                )
-            }) { Text("Create invitation") }
+            Button(
+                enabled = !sending,
+                onClick = {
+                    sending = true
+                    error = null
+                    repository.inviteStaff(name, email, phone, role, branch) { result ->
+                        sending = false
+                        result.fold(
+                            onSuccess = { onInvited() },
+                            onFailure = { error = it.localizedMessage ?: "Unable to invite staff" }
+                        )
+                    }
+                }
+            ) {
+                if (sending) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(if (sending) "Sending…" else "Send invitation")
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
@@ -655,6 +692,8 @@ fun OrganizationSettingsScreen(repository: MemboraRepository, onBack: () -> Unit
     var state by rememberSaveable { mutableStateOf(if (setupMode) "" else repository.organization.state) }
     var postalCode by rememberSaveable { mutableStateOf(if (setupMode) "" else repository.organization.postalCode) }
     var countryCode by rememberSaveable { mutableStateOf(repository.organization.countryCode) }
+    var taxId by rememberSaveable { mutableStateOf(repository.organization.taxId) }
+    var receiptFooter by rememberSaveable { mutableStateOf(repository.organization.receiptFooter) }
     var saved by rememberSaveable { mutableStateOf(false) }
     var saveError by rememberSaveable { mutableStateOf<String?>(null) }
     var logoUploading by rememberSaveable { mutableStateOf(false) }
@@ -744,7 +783,9 @@ fun OrganizationSettingsScreen(repository: MemboraRepository, onBack: () -> Unit
                                     city = city,
                                     state = state,
                                     postalCode = postalCode,
-                                    countryCode = normalizedCountry
+                                    countryCode = normalizedCountry,
+                                    taxId = taxId,
+                                    receiptFooter = receiptFooter
                                 )
                             }
                             result.fold(
@@ -881,6 +922,27 @@ fun OrganizationSettingsScreen(repository: MemboraRepository, onBack: () -> Unit
                         "Preview: ${currency?.getSymbol(Locale.getDefault()).orEmpty()} ${normalizedCurrency.ifBlank { "—" }} • ${normalizedTimezone.ifBlank { "—" }}",
                         style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            item {
+                SectionHeading("Receipt settings")
+                AppCard {
+                    OutlinedTextField(
+                        value = taxId,
+                        onValueChange = { taxId = it; changed() },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Tax / GST registration number") },
+                        supportingText = { Text("Printed on payment receipts when provided") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = receiptFooter,
+                        onValueChange = { receiptFooter = it.take(160); changed() },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Receipt footer") },
+                        supportingText = { Text("${receiptFooter.length}/160 characters") },
+                        minLines = 2
                     )
                 }
             }

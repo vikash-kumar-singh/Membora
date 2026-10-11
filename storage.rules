@@ -6,6 +6,42 @@ service firebase.storage {
       return request.auth != null;
     }
 
+    function accessId(ownerUid, businessId) {
+      return ownerUid + "_" + businessId;
+    }
+
+    function accessPath(ownerUid, businessId) {
+      return /databases/(default)/documents/users/$(request.auth.uid)/workspaceAccess/$(accessId(ownerUid, businessId));
+    }
+
+    function isOwner(ownerUid) {
+      return signedIn() && request.auth.uid == ownerUid;
+    }
+
+    function hasAccess(ownerUid, businessId) {
+      return signedIn() && (
+        isOwner(ownerUid) ||
+        (firestore.exists(accessPath(ownerUid, businessId)) &&
+          firestore.get(accessPath(ownerUid, businessId)).data.status == "ACTIVE")
+      );
+    }
+
+    function canWrite(ownerUid, businessId) {
+      return hasAccess(ownerUid, businessId) && (
+        isOwner(ownerUid) ||
+        firestore.get(accessPath(ownerUid, businessId)).data.role in
+          ["Administrator", "Manager", "Front Desk"]
+      );
+    }
+
+    match /users/{ownerUid}/businesses/{businessId}/{filePath=**} {
+      allow read: if hasAccess(ownerUid, businessId);
+      allow create, update: if canWrite(ownerUid, businessId)
+        && request.resource.size <= 10 * 1024 * 1024;
+      allow delete: if canWrite(ownerUid, businessId);
+    }
+
+    // Retain owner-only access for any legacy files outside a business workspace.
     match /users/{userId}/{filePath=**} {
       allow read, delete: if signedIn() && request.auth.uid == userId;
       allow create, update: if signedIn()

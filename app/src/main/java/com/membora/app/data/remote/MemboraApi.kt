@@ -23,6 +23,13 @@ data class AutomaticDeliveryResponse(
     val duplicate: Boolean = false
 )
 
+data class AutomaticDeliveryStatusResponse(
+    val status: String = "UNKNOWN",
+    val providerMessageId: String = "",
+    val providerStatus: String = "",
+    val detail: String = ""
+)
+
 interface MemboraApi {
     @GET("actuator/health")
     fun health(): Call<HealthResponse>
@@ -43,6 +50,12 @@ interface MemboraApi {
         @Header("X-Firebase-ID-Token") firebaseIdToken: String,
         @Body request: AutomaticDeliveryRequest
     ): Call<AutomaticDeliveryResponse>
+
+    @GET("api/v1/communications/status")
+    fun automaticDeliveryStatus(
+        @Header("X-Firebase-ID-Token") firebaseIdToken: String,
+        @Query("deliveryKey") deliveryKey: String
+    ): Call<AutomaticDeliveryStatusResponse>
 
     @GET("api/v1/reports/dashboard")
     fun dashboard(@Header("X-Organization-Id") organizationId: String): Call<DashboardResponse>

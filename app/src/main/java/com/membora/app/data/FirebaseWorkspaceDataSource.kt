@@ -9,6 +9,7 @@ import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.SetOptions
 import com.google.firebase.firestore.Source
+import com.google.firebase.Timestamp
 import com.membora.app.domain.ActivityEvent
 import com.membora.app.domain.ActivityType
 import com.membora.app.domain.Commitment
@@ -33,6 +34,7 @@ import com.membora.app.firebase.FirebaseServices
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.temporal.ChronoUnit
+import java.util.Date
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -43,10 +45,12 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal class FirebaseWorkspaceDataSource(
     private val userId: String,
+    private val authenticatedUserId: String,
     private val businessId: String,
     private val onOrganization: (Organization) -> Unit,
     private val onOrganizationMissing: () -> Unit,
     private val onWorkspaceError: (Throwable) -> Unit,
+    private val onAccessChanged: (String?, Boolean) -> Unit,
     private val onMembers: (List<Member>) -> Unit,
     private val onPlans: (List<MembershipPlan>) -> Unit,
     private val onMemberships: (List<Membership>) -> Unit,
@@ -65,6 +69,48 @@ internal class FirebaseWorkspaceDataSource(
         private const val MANUAL_SYNC_TIMEOUT_MS = 15_000L
         private const val PENDING_WRITE_WARNING_SECONDS = 12L
         private const val EXPECTED_LISTENERS = 13
+
+        fun resolveWorkspace(
+            authenticatedUserId: String,
+            defaultBusinessId: String,
+            onResult: (Result<WorkspaceAccess>) -> Unit
+        ) {
+            val database = FirebaseServices.firestore
+                ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+            database.collection("users").document(authenticatedUserId)
+                .collection("workspaceAccess").get()
+                .addOnSuccessListener { snapshot ->
+                    val accessDocuments = snapshot.documents.mapNotNull { document ->
+                        val ownerUid = document.getString("ownerUid").orEmpty()
+                        val businessId = document.getString("businessId").orEmpty()
+                        val role = document.getString("role").orEmpty()
+                        if (ownerUid.isBlank() || businessId.isBlank() || role.isBlank()) null
+                        else WorkspaceAccess(
+                            ownerUid = ownerUid,
+                            businessId = businessId,
+                            role = role,
+                            staffId = document.getString("staffId").orEmpty(),
+                            active = document.getString("status") == "ACTIVE"
+                        )
+                    }
+                    val activeAccess = accessDocuments.firstOrNull(WorkspaceAccess::active)
+                    when {
+                        activeAccess != null -> onResult(Result.success(activeAccess))
+                        accessDocuments.isNotEmpty() -> onResult(Result.failure(IllegalStateException(
+                            "Your staff access has been disabled. Contact the organization owner."
+                        )))
+                        else -> onResult(Result.success(WorkspaceAccess(
+                            ownerUid = authenticatedUserId,
+                            businessId = defaultBusinessId,
+                            role = "Owner"
+                        )))
+                    }
+                }
+                .addOnFailureListener { error ->
+                    FirebaseServices.recordException(error)
+                    onResult(Result.failure(error))
+                }
+        }
     }
 
     private val database = FirebaseServices.firestore
@@ -87,6 +133,22 @@ internal class FirebaseWorkspaceDataSource(
         val businessReference = business ?: run {
             reportError(IllegalStateException("Firestore is not configured"))
             return
+        }
+        if (authenticatedUserId != userId) {
+            val accessId = "${userId}_$businessId"
+            val access = database?.collection("users")?.document(authenticatedUserId)
+                ?.collection("workspaceAccess")?.document(accessId)
+            if (access != null) {
+                registrations += access.addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        FirebaseServices.recordException(error)
+                        onAccessChanged(null, false)
+                        return@addSnapshotListener
+                    }
+                    val active = snapshot?.exists() == true && snapshot.getString("status") == "ACTIVE"
+                    onAccessChanged(snapshot?.getString("role"), active)
+                }
+            }
         }
         // Organization creation is explicit: never provision a demo workspace for a new account.
         businessReference.get()
@@ -248,6 +310,136 @@ internal class FirebaseWorkspaceDataSource(
     fun saveCommitment(value: Commitment) = saveCollectionDocument("commitments", value.id, value.toFirebaseMap())
     fun saveActivity(value: ActivityEvent) = saveCollectionDocument("activities", value.id, value.toFirebaseMap())
 
+    fun createStaffInvitation(value: StaffMember, onResult: (Result<Unit>) -> Unit) {
+        val firestore = database
+            ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+        val businessReference = business
+            ?: return onResult(Result.failure(IllegalStateException("Workspace is not connected")))
+        val invitationId = value.invitationId.ifBlank { value.id }
+        val invitation = firestore.collection("staffInvitations").document(invitationId)
+        val staff = businessReference.collection("staff").document(value.id)
+        val expiresAt = Timestamp(Date(System.currentTimeMillis() + 7L * 24L * 60L * 60L * 1_000L))
+        val invitationData = mapOf(
+            "ownerUid" to userId,
+            "businessId" to businessId,
+            "staffId" to value.id,
+            "name" to value.name,
+            "email" to value.email,
+            "phone" to value.phone,
+            "branchName" to value.branchName,
+            "role" to value.role,
+            "status" to "PENDING",
+            "createdByUid" to FirebaseServices.auth?.currentUser?.uid.orEmpty(),
+            "createdAt" to FieldValue.serverTimestamp(),
+            "expiresAt" to expiresAt
+        )
+        beginWrite()
+        firestore.batch()
+            .set(staff, value.toFirebaseMap() + ("updatedAt" to FieldValue.serverTimestamp()))
+            .set(invitation, invitationData)
+            .commit()
+            .addOnSuccessListener {
+                FirebaseServices.sendStaffInvitationEmail(value.email, invitationId) { delivery ->
+                    val status = if (delivery.isSuccess) "SENT" else "DELIVERY_FAILED"
+                    firestore.batch()
+                        .update(invitation, mapOf(
+                            "status" to status,
+                            "lastSentAt" to FieldValue.serverTimestamp(),
+                            "deliveryError" to delivery.exceptionOrNull()?.localizedMessage.orEmpty()
+                        ))
+                        .update(staff, mapOf(
+                            "invitationStatus" to status,
+                            "updatedAt" to FieldValue.serverTimestamp()
+                        ))
+                        .commit()
+                        .addOnCompleteListener { statusTask ->
+                            finishWrite(statusTask.exception ?: delivery.exceptionOrNull())
+                            if (delivery.isSuccess) onResult(Result.success(Unit))
+                            else onResult(Result.failure(delivery.exceptionOrNull()
+                                ?: IllegalStateException("Unable to deliver the invitation email")))
+                        }
+                }
+            }
+            .addOnFailureListener { error ->
+                finishWrite(error)
+                onResult(Result.failure(error))
+            }
+    }
+
+    fun resendStaffInvitation(value: StaffMember, onResult: (Result<Unit>) -> Unit) {
+        val firestore = database
+            ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+        val businessReference = business
+            ?: return onResult(Result.failure(IllegalStateException("Workspace is not connected")))
+        val invitationId = value.invitationId.ifBlank { value.id }
+        val invitation = firestore.collection("staffInvitations").document(invitationId)
+        val staff = businessReference.collection("staff").document(value.id)
+        val expiresAt = Timestamp(Date(System.currentTimeMillis() + 7L * 24L * 60L * 60L * 1_000L))
+        beginWrite()
+        invitation.update(mapOf(
+            "status" to "PENDING",
+            "expiresAt" to expiresAt,
+            "deliveryError" to "",
+            "updatedAt" to FieldValue.serverTimestamp()
+        )).addOnSuccessListener {
+            FirebaseServices.sendStaffInvitationEmail(value.email, invitationId) { delivery ->
+                val status = if (delivery.isSuccess) "SENT" else "DELIVERY_FAILED"
+                firestore.batch()
+                    .update(invitation, mapOf(
+                        "status" to status,
+                        "lastSentAt" to FieldValue.serverTimestamp(),
+                        "deliveryError" to delivery.exceptionOrNull()?.localizedMessage.orEmpty()
+                    ))
+                    .update(staff, mapOf(
+                        "invitationStatus" to status,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    ))
+                    .commit()
+                    .addOnCompleteListener { statusTask ->
+                        finishWrite(statusTask.exception ?: delivery.exceptionOrNull())
+                        if (delivery.isSuccess) onResult(Result.success(Unit))
+                        else onResult(Result.failure(delivery.exceptionOrNull()
+                            ?: IllegalStateException("Unable to deliver the invitation email")))
+                    }
+            }
+        }.addOnFailureListener { error ->
+            finishWrite(error)
+            onResult(Result.failure(error))
+        }
+    }
+
+    fun setStaffAccess(value: StaffMember, onResult: (Result<Unit>) -> Unit = {}) {
+        val firestore = database
+            ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+        val businessReference = business
+            ?: return onResult(Result.failure(IllegalStateException("Workspace is not connected")))
+        val staff = businessReference.collection("staff").document(value.id)
+        val batch = firestore.batch().set(
+            staff,
+            value.toFirebaseMap() + ("updatedAt" to FieldValue.serverTimestamp()),
+            SetOptions.merge()
+        )
+        if (value.firebaseUid.isNotBlank()) {
+            val accessId = "${userId}_$businessId"
+            val access = firestore.collection("users").document(value.firebaseUid)
+                .collection("workspaceAccess").document(accessId)
+            batch.set(access, mapOf(
+                "ownerUid" to userId,
+                "businessId" to businessId,
+                "staffId" to value.id,
+                "role" to value.role,
+                "email" to value.email,
+                "status" to if (value.active) "ACTIVE" else "DISABLED",
+                "invitationId" to value.invitationId,
+                "updatedAt" to FieldValue.serverTimestamp()
+            ), SetOptions.merge())
+        }
+        beginWrite()
+        batch.commit()
+            .addOnSuccessListener { finishWrite(); onResult(Result.success(Unit)) }
+            .addOnFailureListener { error -> finishWrite(error); onResult(Result.failure(error)) }
+    }
+
     private fun saveBusinessDocument(data: Map<String, Any?>, onResult: (Result<Unit>) -> Unit = {}) {
         val reference = business ?: run {
             val error = IllegalStateException("Workspace is not connected")
@@ -398,7 +590,9 @@ private fun Organization.toFirebaseMap(ownerUid: String) = mapOf(
     "city" to city,
     "state" to state,
     "postalCode" to postalCode,
-    "countryCode" to countryCode
+    "countryCode" to countryCode,
+    "taxId" to taxId,
+    "receiptFooter" to receiptFooter
 )
 
 private fun StaffMember.toFirebaseMap() = mapOf(
@@ -408,7 +602,9 @@ private fun StaffMember.toFirebaseMap() = mapOf(
     "email" to email,
     "branchName" to branchName,
     "active" to active,
-    "invitationStatus" to invitationStatus
+    "invitationStatus" to invitationStatus,
+    "firebaseUid" to firebaseUid,
+    "invitationId" to invitationId
 )
 
 private fun Communication.toFirebaseMap() = mapOf(
@@ -585,7 +781,9 @@ private fun DocumentSnapshot.toOrganization(): Organization? = runCatching {
         city = getString("city").orEmpty(),
         state = getString("state").orEmpty(),
         postalCode = getString("postalCode").orEmpty(),
-        countryCode = getString("countryCode") ?: "IN"
+        countryCode = getString("countryCode") ?: "IN",
+        taxId = getString("taxId").orEmpty(),
+        receiptFooter = getString("receiptFooter") ?: "Thank you for your payment."
     )
 }.getOrNull()
 
@@ -598,7 +796,9 @@ private fun DocumentSnapshot.toStaffMember(): StaffMember? = runCatching {
         active = getBoolean("active") ?: true,
         email = getString("email").orEmpty(),
         branchName = getString("branchName") ?: "Main",
-        invitationStatus = getString("invitationStatus") ?: "ACTIVE"
+        invitationStatus = getString("invitationStatus") ?: "ACTIVE",
+        firebaseUid = getString("firebaseUid").orEmpty(),
+        invitationId = getString("invitationId").orEmpty()
     )
 }.getOrNull()
 

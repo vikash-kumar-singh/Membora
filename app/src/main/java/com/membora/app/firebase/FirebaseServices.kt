@@ -12,6 +12,7 @@ import androidx.core.content.FileProvider
 import com.google.firebase.FirebaseApp
 import com.google.firebase.analytics.FirebaseAnalytics
 import com.google.firebase.auth.AuthCredential
+import com.google.firebase.auth.ActionCodeSettings
 import com.google.firebase.auth.EmailAuthProvider
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthUserCollisionException
@@ -23,6 +24,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreSettings
 import com.google.firebase.firestore.PersistentCacheSettings
 import com.google.firebase.firestore.SetOptions
+import com.google.firebase.Timestamp
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.storage.FirebaseStorage
 import com.google.firebase.storage.StorageException
@@ -44,6 +46,13 @@ data class FirebaseRuntimeState(
     val authenticatedUserId: String? = null,
     val messagingRegistrationAvailable: Boolean = false,
     val message: String? = null
+)
+
+data class AcceptedStaffInvitation(
+    val ownerUid: String,
+    val businessId: String,
+    val role: String,
+    val staffId: String
 )
 
 /**
@@ -76,6 +85,17 @@ object FirebaseServices {
     private var pendingGoogleLink: PendingGoogleLink? = null
     private var appContext: Context? = null
     private var initialized = false
+    private var activeWorkspaceOwnerUid: String? = null
+
+    fun setActiveWorkspace(ownerUid: String) {
+        activeWorkspaceOwnerUid = ownerUid
+    }
+
+    fun clearActiveWorkspace() {
+        activeWorkspaceOwnerUid = null
+    }
+
+    private fun storageOwnerUid(): String? = activeWorkspaceOwnerUid ?: auth?.currentUser?.uid
 
     @Synchronized
     fun initialize(context: Context) {
@@ -218,6 +238,150 @@ object FirebaseServices {
         }
     }
 
+    fun sendStaffInvitationEmail(
+        email: String,
+        invitationId: String,
+        onResult: (Result<Unit>) -> Unit
+    ) {
+        val firebaseAuth = auth
+            ?: return onResult(Result.failure(IllegalStateException("Firebase Auth is not configured")))
+        val emailAddress = email.trim().lowercase()
+        val continueUrl = "https://membora-app.firebaseapp.com/invite?invitation=$invitationId"
+        val settings = ActionCodeSettings.newBuilder()
+            .setUrl(continueUrl)
+            .setHandleCodeInApp(true)
+            .setAndroidPackageName(BuildConfig.APPLICATION_ID, true, BuildConfig.VERSION_CODE.toString())
+            .build()
+        firebaseAuth.sendSignInLinkToEmail(emailAddress, settings).addOnCompleteListener { task ->
+            if (task.isSuccessful) {
+                analytics?.logEvent("staff_invitation_email_sent", Bundle())
+                onResult(Result.success(Unit))
+            } else {
+                val error = task.exception ?: IllegalStateException("Unable to send the staff invitation email")
+                recordException(error)
+                onResult(Result.failure(error))
+            }
+        }
+    }
+
+    fun isStaffInvitationLink(link: String?): Boolean =
+        !link.isNullOrBlank() && auth?.isSignInWithEmailLink(link) == true &&
+            invitationIdFromEmailLink(link) != null
+
+    fun acceptStaffInvitation(
+        email: String,
+        emailLink: String,
+        onResult: (Result<AcceptedStaffInvitation>) -> Unit
+    ) {
+        val firebaseAuth = auth
+            ?: return onResult(Result.failure(IllegalStateException("Firebase Auth is not configured")))
+        val database = firestore
+            ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+        val emailAddress = email.trim().lowercase()
+        if (emailAddress.isBlank()) {
+            onResult(Result.failure(IllegalArgumentException("Enter the email address that received this invitation")))
+            return
+        }
+        val invitationId = invitationIdFromEmailLink(emailLink)
+            ?: return onResult(Result.failure(IllegalArgumentException("This staff invitation link is invalid")))
+        if (!firebaseAuth.isSignInWithEmailLink(emailLink)) {
+            onResult(Result.failure(IllegalArgumentException("This staff invitation link is invalid or incomplete")))
+            return
+        }
+
+        firebaseAuth.signInWithEmailLink(emailAddress, emailLink).addOnCompleteListener { signInTask ->
+            val user = if (signInTask.isSuccessful) signInTask.result?.user else null
+            if (user == null) {
+                val error = signInTask.exception ?: IllegalStateException("Unable to authenticate this invitation")
+                recordException(error)
+                onResult(Result.failure(error))
+                return@addOnCompleteListener
+            }
+            val authenticatedEmail = user.email?.trim()?.lowercase()
+            if (authenticatedEmail != emailAddress) {
+                firebaseAuth.signOut()
+                onResult(Result.failure(IllegalStateException("Use the same email address that received the invitation")))
+                return@addOnCompleteListener
+            }
+
+            val invitation = database.collection("staffInvitations").document(invitationId)
+            database.runTransaction { transaction ->
+                val snapshot = transaction.get(invitation)
+                check(snapshot.exists()) { "This staff invitation no longer exists" }
+                val invitedEmail = snapshot.getString("email")?.trim()?.lowercase().orEmpty()
+                check(invitedEmail == authenticatedEmail) { "This invitation belongs to another email address" }
+                val status = snapshot.getString("status").orEmpty()
+                check(status in setOf("PENDING", "SENT", "DELIVERY_FAILED")) {
+                    if (status == "ACCEPTED") "This invitation has already been accepted" else "This invitation is no longer active"
+                }
+                val expiresAt = snapshot.getTimestamp("expiresAt")
+                check(expiresAt == null || expiresAt > Timestamp.now()) { "This invitation has expired. Ask the owner to resend it." }
+
+                val ownerUid = snapshot.getString("ownerUid").orEmpty()
+                val businessId = snapshot.getString("businessId").orEmpty()
+                val staffId = snapshot.getString("staffId").orEmpty()
+                val role = snapshot.getString("role").orEmpty()
+                check(ownerUid.isNotBlank() && businessId.isNotBlank() && staffId.isNotBlank() && role.isNotBlank()) {
+                    "This invitation is incomplete"
+                }
+                val accessId = "${ownerUid}_$businessId"
+                val access = database.collection("users").document(user.uid)
+                    .collection("workspaceAccess").document(accessId)
+                val staff = database.collection("users").document(ownerUid)
+                    .collection("businesses").document(businessId)
+                    .collection("staff").document(staffId)
+
+                transaction.update(invitation, mapOf(
+                    "status" to "ACCEPTED",
+                    "acceptedUid" to user.uid,
+                    "acceptedAt" to FieldValue.serverTimestamp()
+                ))
+                transaction.set(access, mapOf(
+                    "ownerUid" to ownerUid,
+                    "businessId" to businessId,
+                    "staffId" to staffId,
+                    "role" to role,
+                    "email" to authenticatedEmail,
+                    "status" to "ACTIVE",
+                    "invitationId" to invitationId,
+                    "acceptedAt" to FieldValue.serverTimestamp(),
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ))
+                transaction.update(staff, mapOf(
+                    "active" to true,
+                    "invitationStatus" to "ACTIVE",
+                    "firebaseUid" to user.uid,
+                    "invitationId" to invitationId,
+                    "updatedAt" to FieldValue.serverTimestamp()
+                ))
+                AcceptedStaffInvitation(ownerUid, businessId, role, staffId)
+            }.addOnSuccessListener { accepted ->
+                analytics?.logEvent("staff_invitation_accepted", Bundle().apply {
+                    putString("role", accepted.role)
+                })
+                onResult(Result.success(accepted))
+            }.addOnFailureListener { error ->
+                recordException(error)
+                onResult(Result.failure(error))
+            }
+        }
+    }
+
+    private fun invitationIdFromEmailLink(link: String): String? {
+        fun invitationFrom(value: String): String? = runCatching {
+            Uri.parse(value).getQueryParameter("invitation")?.takeIf(String::isNotBlank)
+        }.getOrNull()
+
+        invitationFrom(link)?.let { return it }
+        var nested = runCatching { Uri.parse(link).getQueryParameter("continueUrl") }.getOrNull()
+        repeat(3) {
+            val value = nested ?: return@repeat
+            invitationFrom(value)?.let { return it }
+            nested = runCatching { Uri.parse(value).getQueryParameter("continueUrl") }.getOrNull()
+        }
+        return null
+    }
+
     /** Exchanges a Google ID token for a Firebase session without ever handling a Google password. */
     fun signInWithGoogleIdToken(idToken: String, onResult: (Result<FirebaseUser>) -> Unit) {
         val firebaseAuth = auth
@@ -346,7 +510,7 @@ object FirebaseServices {
         privateFile: Boolean = false,
         onResult: (Result<Uri>) -> Unit
     ) {
-        val userId = auth?.currentUser?.uid
+        val userId = storageOwnerUid()
             ?: return onResult(Result.failure(IllegalStateException("A Firebase user is required")))
         val firebaseStorage = storage
             ?: return onResult(Result.failure(IllegalStateException("Firebase Storage is not configured")))
@@ -389,7 +553,7 @@ object FirebaseServices {
     }
 
     fun downloadCurrentUserFile(storageUri: String, onResult: (Result<Uri>) -> Unit) {
-        val userId = auth?.currentUser?.uid
+        val userId = storageOwnerUid()
             ?: return onResult(Result.failure(IllegalStateException("Sign in before opening documents")))
         val firebaseStorage = storage
             ?: return onResult(Result.failure(IllegalStateException("Firebase Storage is not configured")))
@@ -429,7 +593,7 @@ object FirebaseServices {
         keepUrls: Set<String>,
         onResult: (Result<Unit>) -> Unit
     ) {
-        val userId = auth?.currentUser?.uid
+        val userId = storageOwnerUid()
             ?: return onResult(Result.failure(IllegalStateException("Sign in before cleaning up files")))
         val firebaseStorage = storage
             ?: return onResult(Result.failure(IllegalStateException("Firebase Storage is not configured")))
@@ -478,7 +642,7 @@ object FirebaseServices {
     }
 
     fun deleteCurrentUserFile(fileUrl: String, onResult: (Result<Unit>) -> Unit = {}) {
-        val userId = auth?.currentUser?.uid
+        val userId = storageOwnerUid()
             ?: return onResult(Result.failure(IllegalStateException("Sign in before deleting files")))
         val firebaseStorage = storage
             ?: return onResult(Result.failure(IllegalStateException("Firebase Storage is not configured")))

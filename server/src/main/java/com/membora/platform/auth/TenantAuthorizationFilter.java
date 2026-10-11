@@ -12,7 +12,8 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class TenantAuthorizationFilter extends OncePerRequestFilter {
     @Override protected boolean shouldNotFilter(HttpServletRequest request) {
         var path = request.getRequestURI();
-        return path.startsWith("/actuator/health") || path.startsWith("/api/v1/auth/")
+        return path.equals("/health") || path.startsWith("/actuator/health") || path.startsWith("/api/v1/auth/")
+            || path.startsWith("/api/v1/webhooks/")
             || path.startsWith("/api/v1/media/")
             || (path.equals("/api/v1/organizations") && request.getMethod().equals("POST"));
     }

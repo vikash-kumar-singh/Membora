@@ -37,6 +37,7 @@ public class ImageKitService {
     }
 
     public ImageKitAuthResponse createUploadAuthentication(String firebaseUserId) {
+        properties.requiredPrivateKey();
         var userId = safeSegment(firebaseUserId);
         Map<String, Object> authentication = client.helper().getAuthenticationParameters(null, null);
         var token = requiredString(authentication, "token");

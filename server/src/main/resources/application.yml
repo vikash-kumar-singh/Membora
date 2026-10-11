@@ -13,7 +13,13 @@ spring:
     enabled: false
 
 server:
-  port: 8080
+  # Cloud/container platforms inject PORT; local development continues to use 8080.
+  port: ${PORT:8080}
+  forward-headers-strategy: framework
+  shutdown: graceful
+
+spring.lifecycle:
+  timeout-per-shutdown-phase: 20s
 
 management:
   endpoints:
@@ -51,6 +57,10 @@ membora:
       welcome-template-id: ${MSG91_TEMPLATE_WELCOME:}
       payment-received-template-id: ${MSG91_TEMPLATE_PAYMENT_RECEIVED:}
       renewal-thanks-template-id: ${MSG91_TEMPLATE_RENEWAL_THANKS:}
+    webhooks:
+      meta-verify-token: ${META_WHATSAPP_WEBHOOK_VERIFY_TOKEN:}
+      meta-app-secret: ${META_APP_SECRET:}
+      msg91-token: ${MSG91_WEBHOOK_TOKEN:}
   security:
     jwt-secret: ${JWT_SECRET:local-development-secret-change-me-32-bytes}
     access-token-minutes: 15

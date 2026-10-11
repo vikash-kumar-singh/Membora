@@ -22,7 +22,13 @@ public class CommunicationDelivery {
     @Column(nullable = false, length = 80) public String templateKey;
     @Column(nullable = false, length = 30) public String status;
     @Column(length = 255) public String providerMessageId;
+    @Column(length = 40) public String providerStatus;
     @Column(length = 1000) public String errorDetail;
+    public Instant providerEventAt;
+    public Instant deliveredAt;
+    public Instant readAt;
+    public Instant failedAt;
+    @Column(nullable = false) public int webhookEventCount;
     @Column(nullable = false) public int attemptCount;
     @Column(nullable = false) public Instant createdAt;
     @Column(nullable = false) public Instant updatedAt;
@@ -37,6 +43,7 @@ public class CommunicationDelivery {
         this.recipient = recipient;
         this.templateKey = templateKey;
         this.status = "PENDING";
+        this.webhookEventCount = 0;
         this.createdAt = Instant.now();
         this.updatedAt = this.createdAt;
     }
