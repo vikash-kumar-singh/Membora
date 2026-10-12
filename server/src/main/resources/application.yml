@@ -30,6 +30,11 @@ management:
 membora:
   firebase:
     project-id: ${FIREBASE_PROJECT_ID:membora-app}
+  play:
+    package-name: ${GOOGLE_PLAY_PACKAGE_NAME:com.membora.app}
+    product-id: ${GOOGLE_PLAY_SUBSCRIPTION_PRODUCT_ID:membora_premium}
+    rtdn-audience: ${GOOGLE_PLAY_RTDN_AUDIENCE:}
+    rtdn-service-account-email: ${GOOGLE_PLAY_RTDN_SERVICE_ACCOUNT_EMAIL:}
   imagekit:
     public-key: ${IMAGEKIT_PUBLIC_KEY:public_cNDr0TfiDtmw5Dgx+VVpRBo7+C4=}
     private-key: ${IMAGEKIT_PRIVATE_KEY:}

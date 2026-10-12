@@ -18,12 +18,44 @@ service firebase.storage {
       return /databases/(default)/documents/users/$(request.auth.uid)/workspaceAccess/$(accessId(ownerUid, businessId));
     }
 
+    function subscriptionPath(ownerUid) {
+      return /databases/(default)/documents/users/$(ownerUid)/account/subscription;
+    }
+
+    function userPath(ownerUid) {
+      return /databases/(default)/documents/users/$(ownerUid);
+    }
+
+    function ownerTrialActive(ownerUid) {
+      return (
+        firestore.exists(userPath(ownerUid)) &&
+        "guestTrialStartedAt" in firestore.get(userPath(ownerUid)).data &&
+        firestore.get(userPath(ownerUid)).data.guestTrialStartedAt is timestamp &&
+        request.time < firestore.get(userPath(ownerUid)).data.guestTrialStartedAt + duration.value(15, "d")
+      ) || (
+        ownerUid == request.auth.uid &&
+        request.auth.token.firebase.sign_in_provider == "anonymous" &&
+        request.time.toMillis() < request.auth.token.auth_time * 1000 + 1296000000
+      );
+    }
+
+    function ownerSubscriptionActive(ownerUid) {
+      return firestore.exists(subscriptionPath(ownerUid)) &&
+        firestore.get(subscriptionPath(ownerUid)).data.entitled == true &&
+        firestore.get(subscriptionPath(ownerUid)).data.expiresAt is timestamp &&
+        firestore.get(subscriptionPath(ownerUid)).data.expiresAt > request.time;
+    }
+
+    function accountAccessActive(ownerUid) {
+      return ownerTrialActive(ownerUid) || ownerSubscriptionActive(ownerUid);
+    }
+
     function isOwner(ownerUid) {
       return signedIn() && request.auth.uid == ownerUid;
     }
 
     function hasAccess(ownerUid, businessId) {
-      return signedIn() && (
+      return signedIn() && accountAccessActive(ownerUid) && (
         isOwner(ownerUid) ||
         (firestore.exists(accessPath(ownerUid, businessId)) &&
           firestore.get(accessPath(ownerUid, businessId)).data.status == "ACTIVE")
@@ -47,9 +79,10 @@ service firebase.storage {
 
     // Retain owner-only access for any legacy files outside a business workspace.
     match /users/{userId}/{filePath=**} {
-      allow read, delete: if signedIn() && request.auth.uid == userId;
+      allow read, delete: if signedIn() && request.auth.uid == userId && accountAccessActive(userId);
       allow create, update: if signedIn()
         && request.auth.uid == userId
+        && accountAccessActive(userId)
         && request.resource.size <= 10 * 1024 * 1024;
     }
 

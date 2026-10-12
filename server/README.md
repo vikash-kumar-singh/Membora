@@ -35,6 +35,9 @@ All tenant-owned API requests require an `X-Organization-Id` header. Repositorie
 - `GET/POST /api/v1/webhooks/meta-whatsapp` (Meta verification and signed delivery events)
 - `POST /api/v1/webhooks/msg91-sms` (authenticated MSG91 delivery reports)
 - `GET /actuator/health`
+- `GET /api/v1/subscriptions/status` (verified Firebase ID token required)
+- `POST /api/v1/subscriptions/verify` (Google Play server verification and acknowledgement)
+- `POST /api/v1/subscriptions/google-play-notifications` (authenticated Google Play RTDN lifecycle updates)
 
 JWT authentication, role/permission checks, tenant filtering, Flyway migrations, and secure
 ImageKit client-upload authentication and idempotent automatic WhatsApp/SMS provider submission are
@@ -45,6 +48,9 @@ states back from the status endpoint. Webhook updates are idempotent and cannot 
 message to an earlier state.
 
 Production requires `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`, and `FIREBASE_PROJECT_ID`.
+Google Play subscriptions additionally require Application Default Credentials with Android Publisher
+and Firestore access, plus `GOOGLE_PLAY_PACKAGE_NAME` and `GOOGLE_PLAY_SUBSCRIPTION_PRODUCT_ID`.
+See `play/SUBSCRIPTION_SETUP.md` for the product IDs, deployment order, and acceptance tests.
 The `IMAGEKIT_*` variables are optional and are only required for legacy ImageKit-hosted private
 files; current Android uploads use Firebase Storage. Automatic messaging uses the `META_WHATSAPP_*`
 and `MSG91_*` variables listed in `.env.example`. Provider secrets belong only on the server and must

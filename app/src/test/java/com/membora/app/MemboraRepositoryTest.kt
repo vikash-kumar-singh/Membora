@@ -541,6 +541,14 @@ class MemboraRepositoryTest {
     @Test
     fun createOrganizationCompletesWorkspaceProvisioning() {
         val repository = MemboraRepository()
+        repository.updateOrganization(
+            name = repository.organization.name,
+            businessType = repository.organization.businessType,
+            memberLabel = repository.organization.memberLabel,
+            phone = repository.organization.phone,
+            email = repository.organization.email,
+            logoUrl = "https://cdn.example.com/another-organization-logo.jpg"
+        ).getOrThrow()
 
         val result = repository.createOrganization(
             name = "Membora Test Org",
@@ -560,6 +568,7 @@ class MemboraRepositoryTest {
         assertTrue(result.isSuccess)
         assertEquals(WorkspaceProvisioningState.READY, repository.workspaceProvisioningState)
         assertEquals("Membora Test Org", repository.organization.name)
+        assertEquals("", repository.organization.logoUrl)
     }
 
     @Test

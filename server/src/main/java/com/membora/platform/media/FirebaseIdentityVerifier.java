@@ -44,7 +44,7 @@ public class FirebaseIdentityVerifier {
             var jwt = decoder.decode(rawToken.trim());
             var firebase = jwt.getClaimAsMap("firebase");
             var provider = firebase == null ? null : firebase.get("sign_in_provider");
-            if ("anonymous".equals(provider)) {
+            if ("anonymous".equals(provider) && jwt.getClaimAsString("email") == null) {
                 throw new IllegalArgumentException("Anonymous accounts cannot upload files");
             }
             var subject = jwt.getSubject();

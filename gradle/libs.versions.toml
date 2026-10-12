@@ -20,6 +20,7 @@ imagekitAndroid = "3.0.1"
 ucrop = "2.2.11"
 workManager = "2.12.0"
 googleCodeScanner = "16.1.0"
+playBilling = "9.1.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -57,6 +58,7 @@ imagekit-android = { module = "com.github.imagekit-developer.imagekit-android:im
 ucrop = { module = "com.github.yalantis:ucrop", version.ref = "ucrop" }
 androidx-work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workManager" }
 google-code-scanner = { module = "com.google.android.gms:play-services-code-scanner", version.ref = "googleCodeScanner" }
+play-billing = { module = "com.android.billingclient:billing", version.ref = "playBilling" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -57,6 +57,17 @@ interface MemboraApi {
         @Query("deliveryKey") deliveryKey: String
     ): Call<AutomaticDeliveryStatusResponse>
 
+    @GET("api/v1/subscriptions/status")
+    fun accountSubscriptionStatus(
+        @Header("X-Firebase-ID-Token") firebaseIdToken: String
+    ): Call<AccountSubscriptionResponse>
+
+    @POST("api/v1/subscriptions/verify")
+    fun verifyAccountSubscription(
+        @Header("X-Firebase-ID-Token") firebaseIdToken: String,
+        @Body request: VerifySubscriptionRequest
+    ): Call<AccountSubscriptionResponse>
+
     @GET("api/v1/reports/dashboard")
     fun dashboard(@Header("X-Organization-Id") organizationId: String): Call<DashboardResponse>
 

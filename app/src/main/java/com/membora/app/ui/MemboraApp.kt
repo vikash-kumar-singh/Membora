@@ -33,6 +33,10 @@ import androidx.credentials.CredentialManager
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.firebase.auth.FirebaseAuth
 import com.membora.app.BuildConfig
+import com.membora.app.billing.AccountSubscription
+import com.membora.app.billing.AccountSubscriptionState
+import com.membora.app.billing.SubscriptionLoadState
+import com.membora.app.billing.SubscriptionVerificationService
 import com.membora.app.data.MemboraRepository
 import com.membora.app.data.MemboraViewModel
 import com.membora.app.data.WorkspaceProvisioningState
@@ -162,6 +166,9 @@ fun MemboraApp(
     var signingOut by rememberSaveable { mutableStateOf(false) }
     var upgradingGuest by rememberSaveable { mutableStateOf(false) }
     var currentTimeMillis by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var subscriptionState by remember(firebaseUser?.uid) {
+        mutableStateOf(AccountSubscriptionState())
+    }
 
     LaunchedEffect(firebaseUser?.uid, firebaseUser?.isAnonymous) {
         val anonymousUser = firebaseUser?.takeIf { it.isAnonymous } ?: return@LaunchedEffect
@@ -176,21 +183,46 @@ fun MemboraApp(
     }
 
     LaunchedEffect(firebaseUser?.isAnonymous) {
-        if (firebaseUser?.isAnonymous != true) return@LaunchedEffect
+        if (firebaseUser == null) return@LaunchedEffect
         while (true) {
             currentTimeMillis = System.currentTimeMillis()
             delay(60_000)
         }
     }
 
-    val guestTrial = firebaseUser?.takeIf { it.isAnonymous }?.let { anonymousUser ->
+    val accountTrial = firebaseUser?.let { user ->
         guestTrialStatus(
-            anonymousUserCreatedAtMillis = anonymousUser.metadata?.creationTimestamp,
+            anonymousUserCreatedAtMillis = user.metadata?.creationTimestamp,
             installationTrialStartedAtMillis = installationGuestTrialStartedAt,
             nowMillis = currentTimeMillis
         )
     }
+    val guestTrial = accountTrial?.takeIf { firebaseUser?.isAnonymous == true }
     val guestTrialExpired = guestTrial?.isExpired == true
+
+    DisposableEffect(firebaseUser?.uid, firebaseUser?.isAnonymous) {
+        subscriptionState = if (firebaseUser == null || firebaseUser?.isAnonymous == true) {
+            AccountSubscriptionState(loadState = SubscriptionLoadState.LOADED)
+        } else {
+            AccountSubscriptionState()
+        }
+        val registration = if (firebaseUser != null && firebaseUser?.isAnonymous == false) {
+            FirebaseServices.observeCurrentAccountSubscription { subscriptionState = it }
+        } else null
+        onDispose { registration?.remove() }
+    }
+
+    LaunchedEffect(firebaseUser?.uid, firebaseUser?.isAnonymous) {
+        if (firebaseUser == null || firebaseUser?.isAnonymous == true) return@LaunchedEffect
+        SubscriptionVerificationService.refresh { result ->
+            result.onSuccess { subscription ->
+                subscriptionState = AccountSubscriptionState(
+                    loadState = SubscriptionLoadState.LOADED,
+                    subscription = subscription
+                )
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         delay(650)
@@ -266,6 +298,17 @@ fun MemboraApp(
     NotificationPermissionEffect()
     MemboraApp(
         repository = appViewModel.repository,
+        firebaseUserId = firebaseUser?.uid,
+        requiresSubscription = BuildConfig.FIREBASE_CONFIGURED &&
+            firebaseUser?.isAnonymous == false && accountTrial?.isExpired == true,
+        subscriptionState = subscriptionState,
+        onSubscriptionConfirmed = { subscription ->
+            subscriptionState = AccountSubscriptionState(
+                loadState = SubscriptionLoadState.LOADED,
+                subscription = subscription
+            )
+            appViewModel.repository.retryFirebaseConnection()
+        },
         isGuestSession = firebaseUser?.isAnonymous == true && guestSessionAccepted,
         guestTrialDaysRemaining = guestTrial?.daysRemaining,
         onUpgradeGuest = {
@@ -308,11 +351,32 @@ private fun NotificationPermissionEffect() {
 @Composable
 fun MemboraApp(
     repository: MemboraRepository,
+    firebaseUserId: String? = null,
+    requiresSubscription: Boolean = false,
+    subscriptionState: AccountSubscriptionState = AccountSubscriptionState(
+        loadState = SubscriptionLoadState.LOADED
+    ),
+    onSubscriptionConfirmed: (AccountSubscription) -> Unit = {},
     isGuestSession: Boolean = false,
     guestTrialDaysRemaining: Int? = null,
     onUpgradeGuest: () -> Unit = {},
     onSignOut: () -> Unit = {}
 ) {
+    val subscriptionRequiredForOwner = requiresSubscription &&
+        repository.workspaceAccessResolved &&
+        repository.workspaceOwnerUserId == firebaseUserId &&
+        repository.currentWorkspaceRole == "Owner"
+    if (subscriptionRequiredForOwner && !subscriptionState.subscription.hasAccess) {
+        when (subscriptionState.loadState) {
+            SubscriptionLoadState.LOADING -> MemboraSplashScreen("Checking your subscription")
+            SubscriptionLoadState.LOADED, SubscriptionLoadState.ERROR -> SubscriptionScreen(
+                firebaseUserId = firebaseUserId.orEmpty(),
+                onSubscriptionConfirmed = onSubscriptionConfirmed,
+                onSignOut = onSignOut
+            )
+        }
+        return
+    }
     when (repository.workspaceProvisioningState) {
         WorkspaceProvisioningState.LOADING -> {
             MemboraSplashScreen("Loading your organization")
@@ -442,7 +506,7 @@ fun MemboraApp(
                                 RootTab.MEMBERS -> MembersScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.MEMBERS)) })
                                 RootTab.CHECK_IN -> CheckInScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.CHECK_IN)) })
                                 RootTab.PAYMENTS -> PaymentsScreen(repository, onOpenMember = { open(Destination.MemberDetail(it, RootTab.PAYMENTS)) })
-                                RootTab.MORE -> MoreScreen(repository, onPlans = { open(Destination.Plans) }, onServices = { open(Destination.Services) }, onReports = { open(Destination.Reports) }, onAutomations = { open(Destination.Automations) }, onStaff = { open(Destination.Staff) }, onSettings = { open(Destination.OrganizationSettings) }, isGuestSession = isGuestSession, guestTrialDaysRemaining = guestTrialDaysRemaining, onUpgradeGuest = onUpgradeGuest, onSignOut = onSignOut)
+                                RootTab.MORE -> MoreScreen(repository, onPlans = { open(Destination.Plans) }, onServices = { open(Destination.Services) }, onReports = { open(Destination.Reports) }, onAutomations = { open(Destination.Automations) }, onStaff = { open(Destination.Staff) }, onSettings = { open(Destination.OrganizationSettings) }, isGuestSession = isGuestSession, guestTrialDaysRemaining = guestTrialDaysRemaining, accountSubscription = subscriptionState.subscription.takeIf { it.hasAccess }, onUpgradeGuest = onUpgradeGuest, onSignOut = onSignOut)
                             }
                             is Destination.MemberDetail -> MemberDetailScreen(repository, screen.memberId, onBack = ::goBack)
                             Destination.AddMember -> AddMemberScreen(repository, onBack = ::goBack, onCreated = { open(Destination.MemberDetail(it, RootTab.MEMBERS)) })

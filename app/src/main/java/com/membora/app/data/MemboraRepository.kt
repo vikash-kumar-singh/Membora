@@ -29,7 +29,11 @@ enum class WorkspaceProvisioningState { LOCAL, LOADING, NEEDS_ORGANIZATION, READ
 class MemboraRepository {
     private var firebaseDataSource: FirebaseWorkspaceDataSource? = null
     private var firebaseUserId: String? = null
-    private var workspaceOwnerUserId: String? = null
+    var workspaceOwnerUserId by mutableStateOf<String?>(null)
+        private set
+
+    var workspaceAccessResolved by mutableStateOf(false)
+        private set
 
     var currentWorkspaceRole by mutableStateOf("Owner")
         private set
@@ -135,6 +139,7 @@ class MemboraRepository {
         loadedAutomationSources.clear()
         isAutomationDataReady = false
         workspaceProvisioningState = WorkspaceProvisioningState.LOADING
+        workspaceAccessResolved = false
         workspaceProvisioningError = null
         syncDetails = DataSyncDetails(status = DataSyncStatus.CONNECTING, lastAttemptAt = LocalDateTime.now())
         FirebaseWorkspaceDataSource.resolveWorkspace(userId, organization.id) { result ->
@@ -142,6 +147,7 @@ class MemboraRepository {
             result.fold(
                 onSuccess = { access -> connectResolvedWorkspace(userId, access) },
                 onFailure = { error ->
+                    workspaceAccessResolved = true
                     workspaceProvisioningState = WorkspaceProvisioningState.ERROR
                     workspaceProvisioningError = error.localizedMessage ?: "Unable to resolve workspace access"
                 }
@@ -152,6 +158,7 @@ class MemboraRepository {
     private fun connectResolvedWorkspace(authenticatedUserId: String, access: WorkspaceAccess) {
         workspaceOwnerUserId = access.ownerUid
         currentWorkspaceRole = access.role
+        workspaceAccessResolved = true
         FirebaseServices.setActiveWorkspace(access.ownerUid)
         firebaseDataSource = FirebaseWorkspaceDataSource(
             userId = access.ownerUid,
@@ -209,6 +216,7 @@ class MemboraRepository {
         firebaseDataSource = null
         firebaseUserId = null
         workspaceOwnerUserId = null
+        workspaceAccessResolved = false
         currentWorkspaceRole = "Owner"
         FirebaseServices.clearActiveWorkspace()
         loadedAutomationSources.clear()
@@ -1071,7 +1079,8 @@ Please complete the payment at your convenience. If already paid, please ignore 
         postalCode: String = organization.postalCode,
         countryCode: String = organization.countryCode,
         taxId: String = organization.taxId,
-        receiptFooter: String = organization.receiptFooter
+        receiptFooter: String = organization.receiptFooter,
+        logoUrl: String = organization.logoUrl
     ): Result<Unit> = runCatching {
         val normalizedCurrency = currencyCode.trim().uppercase(Locale.ROOT)
         val currency = Currency.getInstance(normalizedCurrency)
@@ -1102,7 +1111,8 @@ Please complete the payment at your convenience. If already paid, please ignore 
             postalCode = postalCode.trim(),
             countryCode = countryCode.trim().uppercase(Locale.ROOT),
             taxId = taxId.trim(),
-            receiptFooter = receiptFooter.trim().ifBlank { "Thank you for your payment." }
+            receiptFooter = receiptFooter.trim().ifBlank { "Thank you for your payment." },
+            logoUrl = logoUrl.trim()
         )
         firebaseDataSource?.saveOrganization(organization)
         addActivity(null, ActivityType.SYSTEM, "Organization settings updated", "Profile, terminology and regional settings saved")
@@ -1140,7 +1150,8 @@ Please complete the payment at your convenience. If already paid, please ignore 
             city = city,
             state = state,
             postalCode = postalCode,
-            countryCode = countryCode
+            countryCode = countryCode,
+            logoUrl = ""
         ).getOrThrow()
         workspaceProvisioningState = WorkspaceProvisioningState.READY
         workspaceProvisioningError = null

@@ -22,12 +22,44 @@ service cloud.firestore {
       return /databases/$(database)/documents/users/$(request.auth.uid)/workspaceAccess/$(accessId(ownerUid, businessId));
     }
 
+    function subscriptionPath(ownerUid) {
+      return /databases/$(database)/documents/users/$(ownerUid)/account/subscription;
+    }
+
+    function userPath(ownerUid) {
+      return /databases/$(database)/documents/users/$(ownerUid);
+    }
+
+    function ownerTrialActive(ownerUid) {
+      return (
+        exists(userPath(ownerUid)) &&
+        "guestTrialStartedAt" in get(userPath(ownerUid)).data &&
+        get(userPath(ownerUid)).data.guestTrialStartedAt is timestamp &&
+        request.time < get(userPath(ownerUid)).data.guestTrialStartedAt + duration.value(15, "d")
+      ) || (
+        ownerUid == request.auth.uid &&
+        request.auth.token.firebase.sign_in_provider == "anonymous" &&
+        request.time.toMillis() < request.auth.token.auth_time * 1000 + 1296000000
+      );
+    }
+
+    function ownerSubscriptionActive(ownerUid) {
+      return exists(subscriptionPath(ownerUid)) &&
+        get(subscriptionPath(ownerUid)).data.entitled == true &&
+        get(subscriptionPath(ownerUid)).data.expiresAt is timestamp &&
+        get(subscriptionPath(ownerUid)).data.expiresAt > request.time;
+    }
+
+    function accountAccessActive(ownerUid) {
+      return ownerTrialActive(ownerUid) || ownerSubscriptionActive(ownerUid);
+    }
+
     function isWorkspaceOwner(ownerUid) {
       return signedIn() && request.auth.uid == ownerUid;
     }
 
     function hasWorkspaceAccess(ownerUid, businessId) {
-      return signedIn() && (
+      return signedIn() && accountAccessActive(ownerUid) && (
         isWorkspaceOwner(ownerUid) ||
         (exists(accessPath(ownerUid, businessId)) &&
           get(accessPath(ownerUid, businessId)).data.status == "ACTIVE")
@@ -93,8 +125,28 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read, create, update: if ownsUser(userId);
+      allow read: if ownsUser(userId);
+      allow create: if ownsUser(userId) &&
+        request.resource.data.keys().hasOnly(["guestTrialStartedAt"]) &&
+        request.resource.data.guestTrialStartedAt == request.time;
+      allow update: if ownsUser(userId) &&
+        (
+          (
+            "guestTrialStartedAt" in resource.data &&
+            resource.data.guestTrialStartedAt == request.resource.data.guestTrialStartedAt
+          ) ||
+          (
+            !("guestTrialStartedAt" in resource.data) &&
+            request.resource.data.guestTrialStartedAt == request.time &&
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(["guestTrialStartedAt"])
+          )
+        );
       allow delete: if false;
+
+      match /account/{documentId} {
+        allow read: if ownsUser(userId);
+        allow write: if false;
+      }
 
       match /devices/{deviceId} {
         allow read, write: if ownsUser(userId);
@@ -128,7 +180,7 @@ service cloud.firestore {
 
       match /businesses/{businessId} {
         allow read: if hasWorkspaceAccess(userId, businessId);
-        allow create: if isWorkspaceOwner(userId);
+        allow create: if isWorkspaceOwner(userId) && accountAccessActive(userId);
         allow update: if hasWorkspaceRole(userId, businessId, ["Owner", "Administrator"]);
         allow delete: if false;
 

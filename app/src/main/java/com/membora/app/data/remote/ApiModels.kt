@@ -25,6 +25,21 @@ data class ImageKitSignedUrlResponse(
     val expiresAt: Long = 0
 )
 
+data class VerifySubscriptionRequest(
+    val productId: String,
+    val purchaseToken: String
+)
+
+data class AccountSubscriptionResponse(
+    val entitled: Boolean = false,
+    val status: String = "NONE",
+    val productId: String = "",
+    val basePlanId: String = "",
+    val expiresAt: String? = null,
+    val autoRenewing: Boolean = false,
+    val verifiedAt: String? = null
+)
+
 data class DashboardResponse(
     val totalMembers: Long = 0,
     val activeMemberships: Long = 0,

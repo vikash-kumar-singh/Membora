@@ -1,0 +1,20 @@
+CREATE TABLE account_subscriptions (
+    id BINARY(16) PRIMARY KEY,
+    firebase_user_id VARCHAR(128) NOT NULL,
+    purchase_token VARCHAR(2048) NOT NULL,
+    product_id VARCHAR(100) NOT NULL,
+    base_plan_id VARCHAR(100) NOT NULL,
+    status VARCHAR(60) NOT NULL,
+    latest_order_id VARCHAR(255),
+    started_at TIMESTAMP(6),
+    expires_at TIMESTAMP(6),
+    auto_renewing BOOLEAN NOT NULL DEFAULT FALSE,
+    acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+    test_purchase BOOLEAN NOT NULL DEFAULT FALSE,
+    last_verified_at TIMESTAMP(6) NOT NULL,
+    created_at TIMESTAMP(6) NOT NULL,
+    updated_at TIMESTAMP(6) NOT NULL,
+    CONSTRAINT uq_account_subscription_user UNIQUE (firebase_user_id),
+    CONSTRAINT uq_account_subscription_token UNIQUE (purchase_token(255)),
+    INDEX idx_account_subscription_expiry (expires_at)
+);

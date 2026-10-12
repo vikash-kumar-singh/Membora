@@ -47,6 +47,7 @@ public class SecurityConfig {
                 .requestMatchers("/api/v1/webhooks/**").permitAll()
                 .requestMatchers("/api/v1/media/**").permitAll()
                 .requestMatchers("/api/v1/communications/**").permitAll()
+                .requestMatchers("/api/v1/subscriptions/**").permitAll()
                 .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/v1/organizations").permitAll()
                 .anyRequest().authenticated())
             .oauth2ResourceServer(oauth -> oauth.jwt(jwt -> jwt.jwtAuthenticationConverter(converter)))

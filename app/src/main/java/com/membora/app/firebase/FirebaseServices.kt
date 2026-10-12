@@ -30,6 +30,9 @@ import com.google.firebase.storage.FirebaseStorage
 import com.google.firebase.storage.StorageException
 import com.google.firebase.storage.StorageMetadata
 import com.membora.app.BuildConfig
+import com.membora.app.billing.AccountSubscription
+import com.membora.app.billing.AccountSubscriptionState
+import com.membora.app.billing.SubscriptionLoadState
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -167,15 +170,16 @@ object FirebaseServices {
             onResult(Result.failure(IllegalStateException("Firebase Auth is not configured")))
             return
         }
-        firebaseAuth.currentUser?.let {
-            onResult(Result.success(it))
+        firebaseAuth.currentUser?.let { user ->
+            if (user.isAnonymous) ensureGuestTrialRecord(user, onResult)
+            else onResult(Result.success(user))
             return
         }
         firebaseAuth.signInAnonymously().addOnCompleteListener { task ->
             val user = if (task.isSuccessful) task.result?.user else null
             if (task.isSuccessful && user != null) {
                 analytics?.logEvent("anonymous_sign_in", Bundle())
-                onResult(Result.success(user))
+                ensureGuestTrialRecord(user, onResult)
             } else {
                 val error = task.exception ?: IllegalStateException("Anonymous sign-in failed")
                 Log.e(TAG, "Anonymous sign-in failed", error)
@@ -183,6 +187,70 @@ object FirebaseServices {
                 onResult(Result.failure(error))
             }
         }
+    }
+
+    private fun ensureGuestTrialRecord(
+        user: FirebaseUser,
+        onResult: (Result<FirebaseUser>) -> Unit
+    ) {
+        val database = firestore
+            ?: return onResult(Result.failure(IllegalStateException("Firestore is not configured")))
+        val userDocument = database.collection("users").document(user.uid)
+        database.runTransaction { transaction ->
+            val snapshot = transaction.get(userDocument)
+            if (!snapshot.contains("guestTrialStartedAt")) {
+                transaction.set(
+                    userDocument,
+                    mapOf("guestTrialStartedAt" to FieldValue.serverTimestamp()),
+                    SetOptions.merge()
+                )
+            }
+        }.addOnSuccessListener { onResult(Result.success(user)) }
+            .addOnFailureListener { error ->
+                recordException(error)
+                onResult(Result.failure(error))
+            }
+    }
+
+    fun observeCurrentAccountSubscription(
+        onChanged: (AccountSubscriptionState) -> Unit
+    ): com.google.firebase.firestore.ListenerRegistration? {
+        val user = auth?.currentUser
+        val database = firestore
+        if (user == null || database == null) {
+            onChanged(AccountSubscriptionState(
+                loadState = SubscriptionLoadState.ERROR,
+                message = "Firebase subscription status is unavailable"
+            ))
+            return null
+        }
+        return database.collection("users").document(user.uid)
+            .collection("account").document("subscription")
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    recordException(error)
+                    onChanged(AccountSubscriptionState(
+                        loadState = SubscriptionLoadState.ERROR,
+                        message = error.localizedMessage ?: "Unable to load subscription status"
+                    ))
+                    return@addSnapshotListener
+                }
+                val subscription = if (snapshot?.exists() == true) {
+                    AccountSubscription(
+                        entitled = snapshot.getBoolean("entitled") == true,
+                        status = snapshot.getString("status").orEmpty().ifBlank { "NONE" },
+                        productId = snapshot.getString("productId").orEmpty(),
+                        basePlanId = snapshot.getString("basePlanId").orEmpty(),
+                        expiresAt = snapshot.getTimestamp("expiresAt")?.toDate()?.toInstant(),
+                        autoRenewing = snapshot.getBoolean("autoRenewing") == true,
+                        verifiedAt = snapshot.getTimestamp("verifiedAt")?.toDate()?.toInstant()
+                    )
+                } else AccountSubscription()
+                onChanged(AccountSubscriptionState(
+                    loadState = SubscriptionLoadState.LOADED,
+                    subscription = subscription
+                ))
+            }
     }
 
     fun createEmailAccount(email: String, password: String, onResult: (Result<FirebaseUser>) -> Unit) {

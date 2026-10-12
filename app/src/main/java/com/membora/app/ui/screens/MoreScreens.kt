@@ -38,6 +38,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.membora.app.data.MemboraRepository
 import com.membora.app.LegalLinks
+import com.membora.app.billing.AccountSubscription
+import com.membora.app.billing.MEMBORA_SUBSCRIPTION_PRODUCT_ID
 import com.membora.app.data.WorkspacePermission
 import com.membora.app.automation.AutomationScheduler
 import com.membora.app.data.DataSyncStatus
@@ -66,6 +68,7 @@ fun MoreScreen(
     onSettings: () -> Unit,
     isGuestSession: Boolean = false,
     guestTrialDaysRemaining: Int? = null,
+    accountSubscription: AccountSubscription? = null,
     onUpgradeGuest: () -> Unit = {},
     onSignOut: () -> Unit
 ) {
@@ -163,6 +166,35 @@ fun MoreScreen(
                             Text("Create account and keep this workspace")
                         }
                     }
+                }
+            }
+        }
+        accountSubscription?.let { subscription ->
+            item {
+                AppCard {
+                    Text("Membora subscription", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        subscription.term?.let { "${it.title} plan" } ?: "Active plan",
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        buildString {
+                            append(if (subscription.autoRenewing) "Renews" else "Access until")
+                            subscription.expiresAt?.let { append(" ${it.toString().substringBefore('T')}") }
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = {
+                            uriHandler.openUri(
+                                "https://play.google.com/store/account/subscriptions" +
+                                    "?sku=$MEMBORA_SUBSCRIPTION_PRODUCT_ID&package=com.membora.app"
+                            )
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Manage or cancel in Google Play") }
                 }
             }
         }
@@ -901,7 +933,7 @@ fun OrganizationSettingsScreen(repository: MemboraRepository, onBack: () -> Unit
             item {
                 AppCard {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        if (repository.organization.logoUrl.isNotBlank()) {
+                        if (!setupMode && repository.organization.logoUrl.isNotBlank()) {
                             AsyncImage(
                                 model = repository.organization.logoUrl,
                                 contentDescription = "Organization logo",
